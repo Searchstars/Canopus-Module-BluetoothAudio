@@ -1,0 +1,24 @@
+[package]
+name = "canopus-bluetooth-audio-device"
+description = "Exact-target Canopus Bluetooth headphone manager module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+default = []
+device = ["dep:canopus-target-generated", "dep:canopus-target-private"]
+
+[dependencies]
+canopus-bluetooth-audio-core = { path = "../bluetooth-audio-core" }
+canopus-abi = { path = "/Volumes/EXT0/Canopus/sdk/rust/canopus-abi" }
+canopus-runtime = { path = "/Volumes/EXT0/Canopus/sdk/rust/canopus-runtime" }
+canopus-ui-core = { path = "/Volumes/EXT0/Canopus/sdk/rust/canopus-ui-core" }
+canopus-target-generated = { path = "/Volumes/EXT0/Canopus/sdk/rust/canopus-target-generated", optional = true }
+# Target-private full-trust bindings; carries every recovered absolute address
+# for the current target. The module never hardcodes target addresses.
+canopus-target-private = { path = "/Volumes/EXT0/Canopus/sdk/rust/canopus-target-private", optional = true }

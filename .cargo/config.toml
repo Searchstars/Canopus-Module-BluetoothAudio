@@ -1,0 +1,8 @@
+[build]
+target-dir = "target"
+
+[target.thumbv8m.main-none-eabi]
+rustflags = [
+    "-C", "panic=abort",
+    "-C", "target-cpu=cortex-m33",
+]

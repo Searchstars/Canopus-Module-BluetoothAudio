@@ -1,0 +1,320 @@
+//! Fixed static storage and lock discipline for the target backend.
+//!
+//! The firmware delivers adapter/L2CAP/timer callbacks from the Bluetooth
+//! context while UI events arrive from the miwear context. Cross-context state
+//! lives in atomics exactly like the legacy bridge; the mutable core state
+//! machines (controller, AVDTP source, tone packetizer) are guarded by a
+//! spinlock that callbacks acquire non-blockingly and actions acquire
+//! blockingly. A callback that loses the race is dropped and counted rather
+//! than blocking the Bluetooth stack.
+
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+
+use super::bluetooth::DevicePlatform;
+use canopus_bluetooth_audio_core::{Controller, avdtp, media};
+
+pub const MAGIC: u32 = 0x4241_5541; // "BAUA"
+
+pub const REGISTRATION_NONE: u32 = 0;
+pub const REGISTRATION_ACTIVE: u32 = 1;
+pub const REGISTRATION_COMPLETE: u32 = 2;
+pub const REGISTRATION_FAILED: u32 = 3;
+
+pub const TRANSPORT_DORMANT: u32 = 0;
+pub const TRANSPORT_INITIALIZING: u32 = 1;
+pub const TRANSPORT_READY: u32 = 2;
+pub const TRANSPORT_CONNECTING: u32 = 3;
+pub const TRANSPORT_CONNECTED: u32 = 4;
+pub const TRANSPORT_DISCONNECTING: u32 = 5;
+pub const TRANSPORT_FAILED: u32 = 6;
+pub const TRANSPORT_WAIT_BOND: u32 = 7;
+
+pub const MEDIA_IDLE: u32 = 0;
+pub const MEDIA_CONNECTING: u32 = 1;
+pub const MEDIA_CONNECTED: u32 = 2;
+pub const MEDIA_STARTING: u32 = 3;
+pub const MEDIA_STREAMING: u32 = 4;
+pub const MEDIA_SUSPENDING: u32 = 5;
+pub const MEDIA_COMPLETE: u32 = 6;
+pub const MEDIA_DISCONNECTING: u32 = 7;
+pub const MEDIA_FAILED: u32 = 8;
+
+// Peer flags (module-internal encoding of the connect/bond transaction).
+pub const FLAG_ADAPTER_REGISTERED: u32 = 1 << 0;
+pub const FLAG_ADAPTER_ON: u32 = 1 << 1;
+pub const FLAG_DISCOVERY_ACTIVE: u32 = 1 << 2;
+pub const FLAG_TARGET_SEEN: u32 = 1 << 4;
+pub const FLAG_BOND_PENDING: u32 = 1 << 5;
+pub const FLAG_PAIR_REQUEST: u32 = 1 << 6;
+pub const FLAG_PAIR_DISPLAY: u32 = 1 << 7;
+pub const FLAG_BONDED: u32 = 1 << 8;
+pub const FLAG_CONNECT_BOND_TRIED: u32 = 1 << 9;
+
+// App install result state.
+pub const ERR_STATE: i32 = -1101;
+pub const ERR_ALLOC: i32 = -1102;
+pub const ERR_PACKET: i32 = -1104;
+pub const ERR_REMOTE: i32 = -1105;
+pub const ERR_SDP: i32 = -1106;
+pub const ERR_MEDIA_STATE: i32 = -1201;
+pub const ERR_MEDIA_ALLOC: i32 = -1202;
+pub const ERR_MEDIA_PACKET: i32 = -1203;
+pub const ERR_MEDIA_REMOTE: i32 = -1204;
+pub const ERR_MEDIA_TIMER: i32 = -1205;
+pub const ERRNO_EBUSY: i32 = -16;
+pub const ERRNO_EINVAL: i32 = -22;
+pub const ERRNO_ENOSYS: i32 = -38;
+
+pub const APP_NONE: u32 = 0;
+pub const APP_OK: u32 = 1;
+pub const APP_FAILED: u32 = 2;
+
+pub struct Core {
+    pub controller: Controller<DevicePlatform>,
+    pub source: avdtp::Source,
+    pub packetizer: Option<media::TonePacketizer>,
+    pub signaling_out: [u8; 192],
+    pub media_out: [u8; 640],
+}
+
+impl Core {
+    fn new(generation: u32) -> Self {
+        Self {
+            controller: Controller::new(DevicePlatform),
+            source: avdtp::Source::new(generation),
+            packetizer: None,
+            signaling_out: [0; 192],
+            media_out: [0; 640],
+        }
+    }
+}
+
+pub struct Runtime {
+    pub magic: u32,
+    pub generation: u32,
+    pub adapter: AtomicUsize,
+    pub registration_state: AtomicU32,
+    pub callbacks: [u32; 16],
+    pub flags: AtomicU32,
+    pub scan_stop_pending: AtomicU32,
+    pub discovery_state: AtomicI32,
+    pub adapter_state: AtomicI32,
+    pub bond_transport: AtomicI32,
+    pub bond_state: AtomicI32,
+    pub stock_bond_state: AtomicU32,
+    pub target_low: AtomicU32,
+    pub target_high: AtomicU32,
+    pub target_sequence: AtomicU32,
+    pub scan_epoch: AtomicU32,
+    pub callback_count: AtomicU32,
+    pub callback_dropped: AtomicU32,
+    pub discovery_count: AtomicU32,
+    pub last_error: AtomicI32,
+    // Transport / media (cross-context).
+    pub transport_state: AtomicU32,
+    pub signaling_cid: AtomicU32,
+    pub signaling_mtu: AtomicU32,
+    pub media_state: AtomicU32,
+    pub media_cid: AtomicU32,
+    pub media_mtu: AtomicU32,
+    pub media_generation: AtomicU32,
+    pub media_packets_sent: AtomicU32,
+    pub media_frames_sent: AtomicU32,
+    pub media_packets_target: AtomicU32,
+    pub media_frames_per_packet: AtomicU32,
+    pub media_pace_remainder: AtomicU32,
+    pub media_rtp_sequence: AtomicU32,
+    pub media_rtp_timestamp: AtomicU32,
+    pub media_timer_handle: AtomicU32,
+    pub media_flags: AtomicU32,
+    pub sdp_handle: AtomicU32,
+    pub sdp_registered: AtomicU32,
+    // Native app / lifecycle.
+    pub app_state: AtomicU32,
+    pub app_error: AtomicI32,
+    pub resident: AtomicBool,
+}
+
+impl Runtime {
+    const fn const_new() -> Self {
+        Self {
+            magic: MAGIC,
+            generation: 0,
+            adapter: AtomicUsize::new(0),
+            registration_state: AtomicU32::new(REGISTRATION_NONE),
+            callbacks: [0; 16],
+            flags: AtomicU32::new(0),
+            scan_stop_pending: AtomicU32::new(0),
+            discovery_state: AtomicI32::new(0),
+            adapter_state: AtomicI32::new(-1),
+            bond_transport: AtomicI32::new(1),
+            bond_state: AtomicI32::new(0),
+            stock_bond_state: AtomicU32::new(0),
+            target_low: AtomicU32::new(0),
+            target_high: AtomicU32::new(0),
+            target_sequence: AtomicU32::new(0),
+            scan_epoch: AtomicU32::new(0),
+            callback_count: AtomicU32::new(0),
+            callback_dropped: AtomicU32::new(0),
+            discovery_count: AtomicU32::new(0),
+            last_error: AtomicI32::new(0),
+            transport_state: AtomicU32::new(TRANSPORT_DORMANT),
+            signaling_cid: AtomicU32::new(0),
+            signaling_mtu: AtomicU32::new(0),
+            media_state: AtomicU32::new(MEDIA_IDLE),
+            media_cid: AtomicU32::new(0),
+            media_mtu: AtomicU32::new(0),
+            media_generation: AtomicU32::new(0),
+            media_packets_sent: AtomicU32::new(0),
+            media_frames_sent: AtomicU32::new(0),
+            media_packets_target: AtomicU32::new(0),
+            media_frames_per_packet: AtomicU32::new(0),
+            media_pace_remainder: AtomicU32::new(0),
+            media_rtp_sequence: AtomicU32::new(0),
+            media_rtp_timestamp: AtomicU32::new(0),
+            media_timer_handle: AtomicU32::new(0),
+            media_flags: AtomicU32::new(0),
+            sdp_handle: AtomicU32::new(0),
+            sdp_registered: AtomicU32::new(0),
+            app_state: AtomicU32::new(APP_NONE),
+            app_error: AtomicI32::new(0),
+            resident: AtomicBool::new(false),
+        }
+    }
+}
+
+static mut RUNTIME: core::mem::MaybeUninit<Runtime> = core::mem::MaybeUninit::uninit();
+static mut CORE: core::mem::MaybeUninit<Core> = core::mem::MaybeUninit::uninit();
+static CORE_LOCK: AtomicBool = AtomicBool::new(false);
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// Resets every fixed block and initializes the core state machines. Called
+/// from the module constructor; the firmware invokes it at most once per load.
+pub fn prepare(generation: u32) {
+    // SAFETY: prepare runs in the module constructor before any callback or
+    // UI event can observe this storage. `addr_of_mut!` avoids the
+    // `static_mut_refs` deny lint while still publishing the initialized block.
+    unsafe {
+        core::ptr::addr_of_mut!(RUNTIME)
+            .cast::<Runtime>()
+            .write(Runtime::const_new());
+        core::ptr::addr_of_mut!(CORE)
+            .cast::<Core>()
+            .write(Core::new(generation));
+    }
+    let r = runtime();
+    r.magic = MAGIC;
+    r.generation = generation;
+    r.adapter_state.store(-1, Ordering::Release);
+    r.bond_transport.store(1, Ordering::Release);
+    CORE_LOCK.store(false, Ordering::Release);
+    READY.store(true, Ordering::Release);
+}
+
+/// Returns the cross-context runtime (atomics and callback table).
+pub fn runtime() -> &'static mut Runtime {
+    // SAFETY: all accessors share this storage; cross-context fields are
+    // atomics, write-once fields are set before publication. Mirrors the
+    // legacy bridge's global storage discipline.
+    unsafe { &mut *core::ptr::addr_of_mut!(RUNTIME).cast::<Runtime>() }
+}
+
+/// Runs `f` with exclusive access to the core state machines. Callbacks use
+/// [`try_with_core`]; actions use this blocking form.
+pub fn with_core<R>(f: impl FnOnce(&mut Core) -> R) -> R {
+    while CORE_LOCK
+        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: exclusive ownership of CORE is held by the lock.
+    let out = unsafe { f(&mut *core::ptr::addr_of_mut!(CORE).cast::<Core>()) };
+    CORE_LOCK.store(false, Ordering::Release);
+    out
+}
+
+/// Non-blocking core access for callbacks. Returns `None` and counts a drop
+/// when another context holds the lock.
+pub fn try_with_core<R>(f: impl FnOnce(&mut Core) -> R) -> Option<R> {
+    if CORE_LOCK
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        runtime().callback_dropped.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    // SAFETY: exclusive ownership of CORE is held by the lock.
+    let out = unsafe { f(&mut *core::ptr::addr_of_mut!(CORE).cast::<Core>()) };
+    CORE_LOCK.store(false, Ordering::Release);
+    Some(out)
+}
+
+pub fn initialized() -> bool {
+    READY.load(Ordering::Acquire)
+}
+
+// ---------------------------------------------------------------------------
+// Target address seqlock
+// ---------------------------------------------------------------------------
+
+pub fn target_store(address: [u8; 6]) {
+    let low = u32::from_le_bytes([address[0], address[1], address[2], address[3]]);
+    let high = u32::from(address[4]) | (u32::from(address[5]) << 8);
+    let r = runtime();
+    r.target_sequence.fetch_add(1, Ordering::AcqRel);
+    r.target_low.store(low, Ordering::Relaxed);
+    r.target_high.store(high, Ordering::Relaxed);
+    r.target_sequence.fetch_add(1, Ordering::Release);
+}
+
+/// Reads the target address; returns `None` if a concurrent writer was
+/// observed (callers retry or drop the callback).
+pub fn target_load() -> Option<[u8; 6]> {
+    let r = runtime();
+    for _ in 0..4 {
+        let begin = r.target_sequence.load(Ordering::Acquire);
+        if begin & 1 != 0 {
+            continue;
+        }
+        let low = r.target_low.load(Ordering::Relaxed);
+        let high = r.target_high.load(Ordering::Relaxed);
+        let end = r.target_sequence.load(Ordering::Acquire);
+        if begin == end && end & 1 == 0 {
+            return Some([
+                low as u8,
+                (low >> 8) as u8,
+                (low >> 16) as u8,
+                (low >> 24) as u8,
+                high as u8,
+                (high >> 8) as u8,
+            ]);
+        }
+    }
+    None
+}
+
+pub fn target_matches(address: [u8; 6]) -> bool {
+    match target_load() {
+        Some(target) => target == address,
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flags
+// ---------------------------------------------------------------------------
+
+pub fn flag_set(set: u32, clear: u32) {
+    let r = runtime();
+    if clear != 0 {
+        r.flags.fetch_and(!clear, Ordering::AcqRel);
+    }
+    if set != 0 {
+        r.flags.fetch_or(set, Ordering::AcqRel);
+    }
+}
+
+pub fn flag(bit: u32) -> bool {
+    runtime().flags.load(Ordering::Acquire) & bit != 0
+}
