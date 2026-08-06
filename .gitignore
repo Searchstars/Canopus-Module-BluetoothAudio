@@ -1,0 +1,8 @@
+# Cargo build output only lives at the workspace root; the un-anchored
+# `target/` also matches crates/*/src/target/, which is real source for the
+# exact-target backend and must be tracked.
+/target/
+build/
+.DS_Store
+watchfaces/bluetooth-audio/module.bin
+watchfaces/bluetooth-audio/receipt.bin

@@ -1,0 +1,13 @@
+[package]
+name = "canopus-bluetooth-audio-core"
+description = "Allocator-free Bluetooth headphone manager domain and AVDTP source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+canopus-ui-core = { path = "/Volumes/EXT0/Canopus/sdk/rust/canopus-ui-core" }

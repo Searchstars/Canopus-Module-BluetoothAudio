@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bluetooth-audio-core",
+    "crates/bluetooth-audio-device",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.85"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

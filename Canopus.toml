@@ -1,0 +1,30 @@
+[module]
+id = "org.canopus.bluetooth-audio"
+version = "0.1.0"
+language = "rust"
+lifecycle = "resident-after-activation"
+canopus_abi = "1"
+
+[targets]
+include = ["xiaomi-band-10-pro-3.101.030"]
+
+[capabilities]
+# These are the product requirements. The current public target pack exposes
+# only identity-guard; remaining target-private calls require device validation.
+required = [
+  "identity-guard",
+  "classic.adapter",
+  "classic.l2cap",
+  "classic.sdp",
+  "bt.timer",
+  "native-app.register",
+  "launcher.entry",
+  "ui.dispatch",
+]
+
+[native_app]
+enabled = true
+app_id = "org.canopus.bluetooth-audio"
+name = "Headphones"
+entry = "canopus_module_descriptor"
+role = "standalone"
