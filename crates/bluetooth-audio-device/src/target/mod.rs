@@ -4,16 +4,21 @@
 //! bindings; every absolute address and ABI record lives in the target-private
 //! framework crate. The module itself never hardcodes a firmware address.
 //!
-//! Activation order (module load, module-owner thread):
+//! Activation order (module-owner thread):
 //!
 //!   1. identity guard against the exact firmware,
-//!   2. native app + page + launcher install,
-//!   3. adapter callback registration,
-//!   4. SDP source registration (queued on the Bluetooth owner thread).
+//!   2. adapter callback registration,
+//!   3. SDP source registration (queued on the Bluetooth owner thread).
 //!
-//! Only after all of those succeed is the module marked RESIDENT. Once app
-//! descriptors or Bluetooth callbacks are published, unload is rejected and
-//! requires a reboot.
+//! Native app and Launcher registration are deliberately not part of module
+//! activation. `app_install` mutates miwear's process-local app/page registry;
+//! invoking it synchronously from an already-running Manager page re-enters
+//! that registry and is not rollback-safe when registration is rejected.
+//! Launcher publication must use a separate miwear bootstrap transaction.
+//!
+//! Only after the Bluetooth backend succeeds is the module marked RESIDENT.
+//! Once Bluetooth callbacks are published, unload is rejected and requires a
+//! reboot.
 //!
 //! Lock discipline: Bluetooth/timer callbacks enter the core through the
 //! non-blocking `try_with_core`; UI actions enter through the blocking
@@ -42,8 +47,9 @@ pub fn prepare(generation: u32) {
     runtime::prepare(generation);
 }
 
-/// Verifies identity, publishes the app and backend, and marks the module
-/// boot-resident. Returns 0 on success, a module error code otherwise.
+/// Verifies identity, publishes the Bluetooth backend, and marks the module
+/// boot-resident. Native app registration is a separate bootstrap operation.
+/// Returns 0 on success, a module error code otherwise.
 pub fn activate() -> i32 {
     if !runtime::initialized() {
         return -1;
@@ -52,10 +58,6 @@ pub fn activate() -> i32 {
     if guard != 0 {
         runtime().last_error.store(ERR_STATE, Ordering::Release);
         return guard;
-    }
-    if let Err(error) = native_app::install() {
-        runtime().last_error.store(error, Ordering::Release);
-        return error;
     }
     if let Err(error) = bluetooth::register() {
         runtime().last_error.store(error, Ordering::Release);
@@ -119,8 +121,29 @@ pub fn rebuild(page_index: usize) -> i32 {
 
 /// Dispatches a generation-checked LVX event to the model and re-renders.
 /// Only ever called from the page owner thread (LVX event callbacks).
-pub fn handle_ui_event(page_index: usize, _generation: u32, _key: u32, event_id: u32) {
-    handle_action(page_index, event_id);
+pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u32) {
+    let valid = with_core(|core| {
+        let model = &core.controller.model;
+        if generation != model.generation {
+            return false;
+        }
+        if event_id >= ui::EVENT_DEVICE_BASE {
+            let index = (event_id - ui::EVENT_DEVICE_BASE) as usize;
+            return key == 1000u32 + index as u32 && index < model.devices.entries().len();
+        }
+        matches!(
+            (key, event_id),
+            (11, ui::EVENT_CONNECTED_DETAIL)
+                | (21, ui::EVENT_SCAN)
+                | (31, ui::EVENT_REFRESH)
+                | (34, ui::EVENT_TEST_TONE)
+                | (35, ui::EVENT_DISCONNECT)
+                | (1, ui::EVENT_BACK)
+        )
+    });
+    if valid {
+        handle_action(page_index, event_id);
+    }
 }
 
 fn handle_action(page_index: usize, event_id: u32) {

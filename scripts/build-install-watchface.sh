@@ -17,6 +17,20 @@ TRIPLE=thumbv8m.main-none-eabi
 CC=${CC:-clang}
 KEY=${MODULE_INSTALL_KEY:-"$CANOPUS/.canopus-local/module-installer-ed25519.pem"}
 TOKEN=bluetooth_audio
+LIFECYCLE=$(python3 - "$ROOT/Canopus.toml" <<'PY'
+import pathlib, sys, tomllib
+value = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["module"]["lifecycle"]
+classes = {
+    "removable": 0,
+    "resident-after-activation": 1,
+    "always-resident": 2,
+    "patch-reboot-required": 3,
+}
+if value not in classes:
+    raise SystemExit(f"unsupported module lifecycle: {value}")
+print(classes[value])
+PY
+)
 
 mkdir -p "$OUT" "$WATCHFACE"
 
@@ -39,6 +53,7 @@ echo "[2/4] relocatable link + strip + Canopus verifier"
   -ffreestanding -fno-common -fno-builtin -fno-stack-protector \
   -fno-unwind-tables -fno-asynchronous-unwind-tables \
   -fdata-sections -ffunction-sections -Os -Wall -Wextra -Werror \
+  -I"$CANOPUS/sdk/c" \
   -c "$ROOT/crates/bluetooth-audio-device/c_shim/canopus_ctor.c" \
   -o "$OUT/canopus_ctor.o"
 ld.lld -r "$OUT/canopus_ctor.o" \
@@ -62,23 +77,25 @@ python3 "$CANOPUS/scripts/build-module-installer-receipt.py" \
   --module "$OUT/bluetooth-audio.elf" \
   --module-id "$TOKEN" \
   --version 1 \
-  --lifecycle 0 \
+  --lifecycle "$LIFECYCLE" \
   --private-key "$KEY" \
   --output "$OUT/receipt.bin"
 
 echo "[4/4] smoke-test watchface Lua and stage payloads"
-lua "$ROOT/scripts/smoke-watchface.lua" >/dev/null
+lua "$ROOT/scripts/smoke-watchface.lua" "$WATCHFACE/main.lua" >/dev/null
 cp "$OUT/bluetooth-audio.elf" "$WATCHFACE/module.bin"
 cp "$OUT/receipt.bin" "$WATCHFACE/receipt.bin"
-python3 - "$WATCHFACE" <<'EOF'
+python3 - "$WATCHFACE" "$LIFECYCLE" <<'EOF'
 import hashlib, pathlib, struct, sys
 watchface = pathlib.Path(sys.argv[1])
+expected_lifecycle = int(sys.argv[2])
 module = (watchface / "module.bin").read_bytes()
 receipt = (watchface / "receipt.bin").read_bytes()
 assert module[:4] == b"\x7fELF" and 512 <= len(module) <= 131072
 assert receipt[:4] == b"CMI1" and len(receipt) == 256
 magic, version, header, flags, lifecycle, module_version, artifact_size, reserved = struct.unpack("<8I", receipt[:32])
 assert magic == 0x31494D43 and header == 256
+assert lifecycle == expected_lifecycle, lifecycle
 assert artifact_size == len(module), (artifact_size, len(module))
 expected = hashlib.sha256(module).digest()
 actual = receipt[144:176]

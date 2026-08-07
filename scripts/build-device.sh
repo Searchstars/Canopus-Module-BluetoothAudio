@@ -36,6 +36,7 @@ RUSTFLAGS="$LEAN_RUSTFLAGS" $NIGHTLY build \
   -ffreestanding -fno-common -fno-builtin -fno-stack-protector \
   -fno-unwind-tables -fno-asynchronous-unwind-tables \
   -fdata-sections -ffunction-sections -Os -Wall -Wextra -Werror \
+  -I"$CANOPUS/sdk/c" \
   -c "$ROOT/crates/bluetooth-audio-device/c_shim/canopus_ctor.c" \
   -o "$OUT/canopus_ctor.o"
 

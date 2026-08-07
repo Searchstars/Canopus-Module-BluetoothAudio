@@ -49,6 +49,8 @@ pub const FLAG_PAIR_REQUEST: u32 = 1 << 6;
 pub const FLAG_PAIR_DISPLAY: u32 = 1 << 7;
 pub const FLAG_BONDED: u32 = 1 << 8;
 pub const FLAG_CONNECT_BOND_TRIED: u32 = 1 << 9;
+pub const FLAG_CORE_FILTER_INSTALLED: u32 = 1 << 10;
+pub const FLAG_CORE_FILTER_HIT: u32 = 1 << 11;
 
 // App install result state.
 pub const ERR_STATE: i32 = -1101;
@@ -132,6 +134,8 @@ pub struct Runtime {
     // Native app / lifecycle.
     pub app_state: AtomicU32,
     pub app_error: AtomicI32,
+    pub core_filter_table: AtomicUsize,
+    pub core_filter_handle: AtomicU32,
     pub resident: AtomicBool,
 }
 
@@ -178,6 +182,8 @@ impl Runtime {
             sdp_registered: AtomicU32::new(0),
             app_state: AtomicU32::new(APP_NONE),
             app_error: AtomicI32::new(0),
+            core_filter_table: AtomicUsize::new(0),
+            core_filter_handle: AtomicU32::new(0),
             resident: AtomicBool::new(false),
         }
     }

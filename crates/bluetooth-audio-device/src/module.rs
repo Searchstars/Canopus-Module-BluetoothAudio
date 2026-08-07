@@ -29,10 +29,10 @@ pub extern "C" fn canopus_mod_prepare(_ctx: *const ContextV1) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn canopus_mod_activate(_ctx: *const ContextV1) -> i32 {
-    // Identity guard, native app + page install, adapter registration and SDP
-    // are orchestrated by the target backend; only after all succeed is the
-    // module marked RESIDENT. Once app descriptors or Bluetooth callbacks are
-    // published, unload is irreversible until reboot.
+    // The target backend performs the identity guard, adapter registration and
+    // queued SDP initialization. Native app publication is a separate miwear
+    // bootstrap operation. Once Bluetooth callbacks are published, unload is
+    // irreversible until reboot.
     #[cfg(feature = "device")]
     let rc = crate::target::activate();
     #[cfg(not(feature = "device"))]
@@ -91,6 +91,21 @@ pub extern "C" fn canopus_mod_query(writer: *mut StatusWriterV1) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn canopus_mod_publish_native_app(_ctx: *const ContextV1) -> i32 {
+    #[cfg(feature = "device")]
+    let rc = match crate::target::native_app::install() {
+        Ok(()) => 0,
+        Err(error) => error,
+    };
+    #[cfg(not(feature = "device"))]
+    let rc = 0;
+    if rc != 0 {
+        LAST_ERROR.store(rc as u32, Ordering::Release);
+    }
+    rc
+}
+
+#[unsafe(no_mangle)]
 pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
     struct_size: core::mem::size_of::<ModuleDescriptorV1>() as u32,
     abi_major: ABI_MAJOR,
@@ -100,7 +115,7 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_REQUIRES_UI_DISPATCHER
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
-    module_id: pack(b"org.canopus.bluetooth-audio"),
+    module_id: pack(b"bluetooth_audio"),
     module_version: pack(b"0.1.0"),
     build_id: pack(b"bluetooth-audio-0.1.0"),
     target_id: pack(b"xiaomi-band-10-pro-3.101.030"),
@@ -109,6 +124,7 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
     deactivate: Some(canopus_mod_deactivate),
     stop: Some(canopus_mod_stop),
     query: Some(canopus_mod_query),
+    publish_native_app: Some(canopus_mod_publish_native_app),
 };
 
 #[unsafe(no_mangle)]

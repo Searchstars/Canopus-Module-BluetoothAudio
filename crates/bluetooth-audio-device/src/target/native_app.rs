@@ -109,11 +109,20 @@ pub fn install() -> Result<(), i32> {
         // The installed app object carries its package name pointer at +0x8.
         let package: *const u8 =
             unsafe { core::ptr::read(existing.cast::<u8>().add(8) as *const *const u8) };
-        return if c_str_equal(package, PACKAGE_NAME) {
-            Ok(())
-        } else {
-            Err(-101)
-        };
+        if !c_str_equal(package, PACKAGE_NAME) {
+            return Err(-101);
+        }
+        if r.app_state.load(Ordering::Acquire) != APP_FAILED {
+            return Ok(());
+        }
+        let launcher_rc = unsafe { launcher_add(APP_ID) };
+        if launcher_rc != 0 {
+            r.app_error.store(launcher_rc, Ordering::Release);
+            return Err(launcher_rc);
+        }
+        r.app_state.store(APP_OK, Ordering::Release);
+        r.app_error.store(0, Ordering::Release);
+        return Ok(());
     }
 
     app_descriptor_init();
