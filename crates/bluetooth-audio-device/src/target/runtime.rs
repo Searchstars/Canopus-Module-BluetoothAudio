@@ -68,8 +68,9 @@ pub const ERRNO_EINVAL: i32 = -22;
 pub const ERRNO_ENOSYS: i32 = -38;
 
 pub const APP_NONE: u32 = 0;
-pub const APP_OK: u32 = 1;
-pub const APP_FAILED: u32 = 2;
+pub const APP_REGISTERED: u32 = 1;
+pub const APP_OK: u32 = 2;
+pub const APP_FAILED: u32 = 3;
 
 pub struct Core {
     pub controller: Controller<DevicePlatform>,
@@ -96,7 +97,6 @@ pub struct Runtime {
     pub generation: u32,
     pub adapter: AtomicUsize,
     pub registration_state: AtomicU32,
-    pub callbacks: [u32; 16],
     pub flags: AtomicU32,
     pub scan_stop_pending: AtomicU32,
     pub discovery_state: AtomicI32,
@@ -134,19 +134,20 @@ pub struct Runtime {
     // Native app / lifecycle.
     pub app_state: AtomicU32,
     pub app_error: AtomicI32,
+    pub app_install_result: AtomicI32,
+    pub launcher_add_result: AtomicI32,
     pub core_filter_table: AtomicUsize,
     pub core_filter_handle: AtomicU32,
     pub resident: AtomicBool,
 }
 
 impl Runtime {
-    const fn const_new() -> Self {
+    const fn const_new(generation: u32) -> Self {
         Self {
             magic: MAGIC,
-            generation: 0,
+            generation,
             adapter: AtomicUsize::new(0),
             registration_state: AtomicU32::new(REGISTRATION_NONE),
-            callbacks: [0; 16],
             flags: AtomicU32::new(0),
             scan_stop_pending: AtomicU32::new(0),
             discovery_state: AtomicI32::new(0),
@@ -182,6 +183,8 @@ impl Runtime {
             sdp_registered: AtomicU32::new(0),
             app_state: AtomicU32::new(APP_NONE),
             app_error: AtomicI32::new(0),
+            app_install_result: AtomicI32::new(0),
+            launcher_add_result: AtomicI32::new(0),
             core_filter_table: AtomicUsize::new(0),
             core_filter_handle: AtomicU32::new(0),
             resident: AtomicBool::new(false),
@@ -190,6 +193,7 @@ impl Runtime {
 }
 
 static mut RUNTIME: core::mem::MaybeUninit<Runtime> = core::mem::MaybeUninit::uninit();
+static mut CALLBACKS: [u32; 16] = [0; 16];
 static mut CORE: core::mem::MaybeUninit<Core> = core::mem::MaybeUninit::uninit();
 static CORE_LOCK: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
@@ -203,26 +207,31 @@ pub fn prepare(generation: u32) {
     unsafe {
         core::ptr::addr_of_mut!(RUNTIME)
             .cast::<Runtime>()
-            .write(Runtime::const_new());
+            .write(Runtime::const_new(generation));
+        core::ptr::addr_of_mut!(CALLBACKS).write([0; 16]);
         core::ptr::addr_of_mut!(CORE)
             .cast::<Core>()
             .write(Core::new(generation));
     }
-    let r = runtime();
-    r.magic = MAGIC;
-    r.generation = generation;
-    r.adapter_state.store(-1, Ordering::Release);
-    r.bond_transport.store(1, Ordering::Release);
+    runtime().adapter_state.store(-1, Ordering::Release);
+    runtime().bond_transport.store(1, Ordering::Release);
     CORE_LOCK.store(false, Ordering::Release);
     READY.store(true, Ordering::Release);
 }
 
-/// Returns the cross-context runtime (atomics and callback table).
-pub fn runtime() -> &'static mut Runtime {
-    // SAFETY: all accessors share this storage; cross-context fields are
-    // atomics, write-once fields are set before publication. Mirrors the
-    // legacy bridge's global storage discipline.
-    unsafe { &mut *core::ptr::addr_of_mut!(RUNTIME).cast::<Runtime>() }
+/// Returns the initialized cross-context state. Every field accessed after
+/// publication is immutable or atomic; returning a shared reference avoids
+/// manufacturing aliased `&mut Runtime` values across firmware callbacks.
+pub fn runtime() -> &'static Runtime {
+    // SAFETY: `prepare` initializes RUNTIME before READY publishes it, and no
+    // non-atomic field is mutated afterward.
+    unsafe { &*core::ptr::addr_of!(RUNTIME).cast::<Runtime>() }
+}
+
+/// Returns the separate, write-once adapter callback table. The table is filled
+/// before registration and remains resident/read-only from then until reboot.
+pub fn callbacks_ptr() -> *mut u32 {
+    core::ptr::addr_of_mut!(CALLBACKS).cast::<u32>()
 }
 
 /// Runs `f` with exclusive access to the core state machines. Callbacks use

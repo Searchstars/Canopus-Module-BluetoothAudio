@@ -9,6 +9,8 @@ use canopus_ui_core::{NodeKind, Snapshot, TextStyle};
 
 use super::native_app::{APP_ID, PAGE_COUNT, PAGE_OVERVIEW, page_descriptor_ptr};
 
+static EMPTY_TEXT: [u8; 1] = [0];
+
 #[derive(Copy, Clone)]
 #[repr(C)]
 struct Binding {
@@ -286,18 +288,14 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
                 // Mode 1 draws the stock back affordance wired to
                 // `page_title_back`; mode 0 passes a NULL back callback exactly
                 // like the C backend, so no back button is drawn on overview.
-                let back_callback: LvxEventCallback = if title_mode != 0 {
-                    page_title_back
+                // Keep this nullable at the ABI boundary: a Rust function
+                // pointer cannot validly contain NULL, even if it is never
+                // called, and constructing one lets the compiler eliminate the
+                // overview title creation path as unreachable.
+                let back_callback = if title_mode != 0 {
+                    page_title_back as *const ()
                 } else {
-                    // Matches the C NULL back callback exactly: the firmware
-                    // tests the pointer for null to decide whether to draw the
-                    // back affordance, so a non-null no-op would render one.
-                    // The value is only ever passed to C as data, never called.
-                    #[allow(invalid_value, clippy::transmute_null_to_fn)]
-                    // null fn pointer as data, never called
-                    unsafe {
-                        core::mem::transmute::<usize, LvxEventCallback>(0)
-                    }
+                    core::ptr::null()
                 };
                 let back_context = (page_index << 8) as *mut core::ffi::c_void;
                 backend.page_title = unsafe {
@@ -318,7 +316,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             continue;
         }
         if kind == NodeKind::Text {
-            let object = backend.labels[label_used as usize];
+            let mut object = backend.labels[label_used as usize];
             if object.is_null() {
                 let created = unsafe { lvx_label_create(backend.content_root) };
                 if created.is_null() {
@@ -326,6 +324,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
                 }
                 backend.labels[label_used as usize] = created;
                 backend.label_count += 1;
+                object = created;
             }
             unsafe { lvx_label_set_text(object, primary.as_ptr()) };
             if snapshot.styles[index].text_style == TextStyle::Title as u16 {
@@ -355,10 +354,13 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             return -1;
         }
 
+        // The firmware tests only whether the secondary pointer is NULL. Rust's
+        // empty `str` may use the non-dereferenceable dangling sentinel address
+        // 1, so pass an actual resident NUL byte for rows without detail text.
         let secondary = if node.secondary_len != 0 {
-            snapshot.secondary(node)
+            snapshot.secondary(node).as_ptr()
         } else {
-            ""
+            EMPTY_TEXT.as_ptr()
         };
         let row_kind = target_row_kind(kind);
         let trailing = match row_kind {
@@ -370,21 +372,17 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             Some(slot) => slot,
             None => return -1,
         };
-        let object = backend.rows[slot];
+        let mut object = backend.rows[slot];
         if object.is_null() {
             let created = unsafe {
-                lvx_list_row_create(
-                    backend.content_root,
-                    primary.as_ptr(),
-                    secondary.as_ptr(),
-                    trailing,
-                )
+                lvx_list_row_create(backend.content_root, primary.as_ptr(), secondary, trailing)
             };
             if created.is_null() {
                 return -1;
             }
             backend.rows[slot] = created;
             backend.row_kinds[slot] = row_kind;
+            object = created;
             let event_object = if row_kind == ROW_SWITCH {
                 unsafe { lvx_list_row_trailing(created) }
             } else {
@@ -418,7 +416,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
                 object,
                 core::ptr::null(),
                 primary.as_ptr(),
-                secondary.as_ptr(),
+                secondary,
                 0,
                 selected,
             );

@@ -175,7 +175,8 @@ local function install()
         or u16(response, 4) ~= HEADER_SIZE
         or u16(response, 6) ~= 2
         or u16(response, 8) ~= 1
-        or u16(response, 10) ~= 0
+        -- Accept newer ABI 1.x responses. The request uses the compatible 1.0
+        -- prefix, while the supervisor may report a newer 1.x minor.
         or u32(response, 12) ~= HEADER_SIZE
         or u32(response, 16) ~= CMD_INSTALL
         or u32(response, 20) ~= 1
