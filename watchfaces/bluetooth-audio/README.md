@@ -49,18 +49,19 @@ Overrides:
 1. Build the watchface payloads (above).
 2. Install this watchface on the Band as a normal watchface.
 3. Open it once. Expected result: `Installed — disabled by default.`
-4. Enable the module in Canopus Manager, reboot, press **LOAD**, then press
-   **INSTALL** in the Canopus installer. LOAD restores and automatically activates
-   the backend; INSTALL runs in miwear, reinstalls Manager idempotently, and
-   publishes the `Headphones` native app. Return to Manager to verify
+4. Enable the module in Canopus Manager, reboot, and press **LOAD** in the
+   Canopus installer. Then press **INSTALL** three times, allowing each callback
+   to return before the next press: stage 0 registers Manager, stage 1 registers
+   the Headphones app/pages, and stage 2 adds its Launcher entry. LOAD restores
+   and automatically activates the backend. Return to Manager to verify
    BOOT_RESIDENT or inspect the retained module error. Packages produced by older
    lifecycle-0 builds must be removed before this version is installed; do not
    overwrite only the inbox ELF.
 
 The unsafe path is not used: `app_install` never runs from a Manager click or the
-backend Activate callback. Publication is an ABI 1.1 callback invoked only by the
-miwear-owned installer transaction. A publication failure is persisted for later
-Manager display.
+backend Activate callback. ABI 1.2 gives app/page registration and Launcher
+publication distinct miwear-owned transactions. A publication failure is
+persisted for later Manager display.
 
 ## On-device test scope (device gates)
 

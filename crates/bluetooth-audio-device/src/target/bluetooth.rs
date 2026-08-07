@@ -35,7 +35,7 @@ fn install_core_pair_filter(address: [u8; 6]) -> Result<(), i32> {
     let companion = unsafe { core_bt_companion() };
     let mut companion_match = true;
     for (index, value) in address.iter().enumerate() {
-        if unsafe { *companion.add(index) } != *value {
+        if unsafe { core::ptr::read_volatile(companion.add(index)) } != *value {
             companion_match = false;
             break;
         }
@@ -48,7 +48,7 @@ fn install_core_pair_filter(address: [u8; 6]) -> Result<(), i32> {
     }
     let adapter = unsafe { core_bt_adapter() };
     let handle_ptr = unsafe { core_bt_callback_handle() };
-    let original_handle = unsafe { *handle_ptr };
+    let original_handle = unsafe { core::ptr::read_volatile(handle_ptr) };
     let stock = unsafe { core_bt_callback_table() };
     if adapter.is_null()
         || original_handle == 0
@@ -78,7 +78,7 @@ fn install_core_pair_filter(address: [u8; 6]) -> Result<(), i32> {
         }
         return Err(ERR_CORE_POLICY);
     }
-    unsafe { *handle_ptr = mirror_handle };
+    unsafe { core::ptr::write_volatile(handle_ptr, mirror_handle) };
     r.core_filter_table
         .store(mirror as usize, Ordering::Release);
     r.core_filter_handle.store(mirror_handle, Ordering::Release);
@@ -167,13 +167,17 @@ pub fn register() -> Result<(), i32> {
         return Err(ERR_STATE);
     }
     r.adapter.store(adapter as usize, Ordering::Release);
-    r.callbacks[CALLBACK_ADAPTER_STATE] = on_adapter_state as *const () as usize as u32;
-    r.callbacks[CALLBACK_DISCOVERY_STATE] = on_discovery_state as *const () as usize as u32;
-    r.callbacks[CALLBACK_DISCOVERY_RESULT] = on_discovery_result as *const () as usize as u32;
-    r.callbacks[CALLBACK_PAIR_REQUEST] = on_pair_request as *const () as usize as u32;
-    r.callbacks[CALLBACK_PAIR_DISPLAY] = on_pair_display as *const () as usize as u32;
-    r.callbacks[CALLBACK_BOND_STATE] = on_bond_state as *const () as usize as u32;
-    let handle = unsafe { bt_adapter_register(adapter, r.callbacks.as_ptr()) };
+    let callbacks = callbacks_ptr();
+    unsafe {
+        *callbacks.add(CALLBACK_ADAPTER_STATE) = on_adapter_state as *const () as usize as u32;
+        *callbacks.add(CALLBACK_DISCOVERY_STATE) = on_discovery_state as *const () as usize as u32;
+        *callbacks.add(CALLBACK_DISCOVERY_RESULT) =
+            on_discovery_result as *const () as usize as u32;
+        *callbacks.add(CALLBACK_PAIR_REQUEST) = on_pair_request as *const () as usize as u32;
+        *callbacks.add(CALLBACK_PAIR_DISPLAY) = on_pair_display as *const () as usize as u32;
+        *callbacks.add(CALLBACK_BOND_STATE) = on_bond_state as *const () as usize as u32;
+    }
+    let handle = unsafe { bt_adapter_register(adapter, callbacks.cast_const()) };
     if handle == 0 {
         r.registration_state
             .store(REGISTRATION_FAILED, Ordering::Release);

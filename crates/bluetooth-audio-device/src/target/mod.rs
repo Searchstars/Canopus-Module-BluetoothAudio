@@ -76,7 +76,7 @@ pub fn resident() -> bool {
 }
 
 /// Bounded operational status published through `canopus_mod_query`.
-pub fn query_status() -> [u32; 16] {
+pub fn query_status() -> [u32; 20] {
     let r = runtime();
     [
         r.transport_state.load(Ordering::Acquire),
@@ -95,6 +95,10 @@ pub fn query_status() -> [u32; 16] {
         r.media_frames_sent.load(Ordering::Relaxed),
         r.media_packets_target.load(Ordering::Relaxed),
         r.sdp_registered.load(Ordering::Acquire),
+        r.app_state.load(Ordering::Acquire),
+        r.app_error.load(Ordering::Acquire) as u32,
+        r.app_install_result.load(Ordering::Acquire) as u32,
+        r.launcher_add_result.load(Ordering::Acquire) as u32,
     ]
 }
 

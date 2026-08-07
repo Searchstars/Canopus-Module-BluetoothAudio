@@ -92,13 +92,18 @@ pub extern "C" fn canopus_mod_query(writer: *mut StatusWriterV1) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn canopus_mod_publish_native_app(_ctx: *const ContextV1) -> i32 {
+    -103
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn canopus_mod_publish_native_app_stage(_ctx: *const ContextV1, stage: u32) -> i32 {
     #[cfg(feature = "device")]
-    let rc = match crate::target::native_app::install() {
+    let rc = match crate::target::native_app::install_stage(stage) {
         Ok(()) => 0,
         Err(error) => error,
     };
     #[cfg(not(feature = "device"))]
-    let rc = 0;
+    let rc = if stage == 1 || stage == 2 { 0 } else { -103 };
     if rc != 0 {
         LAST_ERROR.store(rc as u32, Ordering::Release);
     }
@@ -125,6 +130,7 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
     stop: Some(canopus_mod_stop),
     query: Some(canopus_mod_query),
     publish_native_app: Some(canopus_mod_publish_native_app),
+    publish_native_app_stage: Some(canopus_mod_publish_native_app_stage),
 };
 
 #[unsafe(no_mangle)]
