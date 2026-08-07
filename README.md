@@ -7,12 +7,12 @@ Exact-target, allocation-free Rust headphone manager module for Xiaomi Band 10 P
 The full module is implemented and builds to a verifier-clean, size-budgeted ELF:
 
 - portable core (`bluetooth-audio-core`): discovery table (12-entry, dedup), pair/connect controller, AVDTP source, SBC/RTP five-second tone packetizer, bounded Canopus semantic UI — host-tested.
-- exact-target backend (`bluetooth-audio-device`, `device` feature): identity guard, native app + launcher install, two LVX pages (overview + detail), UI-owner-thread dispatcher, Bluetooth adapter callbacks, L2CAP signaling/media, SDP source registration, media tone timer, and RESIDENT irreversible lifecycle.
+- exact-target backend (`bluetooth-audio-device`, `device` feature): identity guard, Bluetooth adapter callbacks, L2CAP signaling/media, SDP source registration, media tone timer, and RESIDENT irreversible lifecycle. Enabled modules are activated automatically by the supervisor during reboot restore. Native app/LVX code remains available for a dedicated miwear bootstrap; backend activation does not publish it.
 - every absolute firmware address and ABI record lives in the framework's `canopus-target-private` crate; the module hardcodes no address, and the required firmware calls are intentionally not added to Canopus's generated public bindings.
 
-Current artifact: `scripts/build-device.sh` is fully green (fmt, workspace + cross clippy, host tests, lean nightly cross-build, `ld.lld -r`, `.llvmbc`/debug strip, Canopus verifier PASS: 61 sections, 0 undefined, 727 relocs, 1 ctor, 1 dtor). Loaded image is **31,906 bytes** against the firmware's 65,536-byte limit, and the file (57,372 B) fits the 128 KiB CMI1 receipt bound. `scripts/build-install-watchface.sh` stages `watchfaces/bluetooth-audio/` with the signed receipt and ELF.
+Current artifact: `scripts/build-device.sh` is fully green (fmt, workspace + cross clippy, host tests, lean nightly cross-build, `ld.lld -r`, `.llvmbc`/debug strip, Canopus verifier PASS: 64 sections, 0 undefined, 746 relocs, 1 ctor, 1 dtor). The file (58,860 B) fits the 128 KiB CMI1 receipt bound. The staged ELF SHA-256 is `4ce58abc600e61cf5721146b6c687e620383ce5648c59f0bf1c10ca13eb90ded`; `scripts/build-install-watchface.sh` stages it with a lifecycle-1 signed receipt. Native app publication is exposed only through the ABI 1.1 miwear bootstrap callback; backend activation never invokes the app-registry firmware calls.
 
-What remains is **device-gated**: launcher visibility, LVX navigation, the UI-owner dispatcher under live scan/connect updates, and real pairing/connect/test-tone on firmware `3.101.030`. Host success and a verifier-clean ELF are not a substitute for those on-device gates; until they pass, the module must not be described as an end-to-end working headphone manager.
+What remains is **device-gated**: crash-free automatic backend activation and real discovery, pairing, AVDTP connection, and test-tone playback on firmware `3.101.030`, plus native app publication through the new miwear bootstrap callback. The earlier unsafe path is gone: boot Activate never calls `app_install`; after LOAD, the installer watchface's payload-free INSTALL transaction runs in miwear, idempotently installs Manager, then publishes loaded ABI 1.1 module apps. Host success and verifier-clean ELFs are not substitutes for those on-device gates.
 
 ## Build
 
@@ -57,14 +57,21 @@ framework's `canopus-installer` watchface):
 2. Open it once. The supervisor verifies the Ed25519 signature, exact target
    and firmware identity, artifact size, and SHA-256, then registers the
    module as installed and disabled.
-3. Open Canopus Manager and enable the `bluetooth_audio` module.
+3. Open Canopus Manager and enable the `bluetooth_audio` module, then reboot and
+   LOAD the supervisor. Restore loads and activates enabled modules automatically;
+   Manager subsequently shows ACTIVE/BOOT_RESIDENT or the retained activation
+   error. A package previously built with lifecycle 0 must be removed and
+   reinstalled; replacing only its ELF leaves the persisted receipt metadata
+   inconsistent.
 
-Enabling loads the identity-guarded lifecycle, installs the `Headphones`
-launcher app with overview/detail LVX pages, registers Bluetooth/SDP, and marks
-the module boot-resident (unload then requires a reboot). Each of these steps —
-launcher visibility, page navigation, the UI-owner dispatcher under live scan
-updates, and pairing/connect/test-tone — is a device gate that must be verified
-on firmware `3.101.030` before the module is considered end-to-end working.
+Automatic activation starts only the identity-guarded Bluetooth/SDP backend and
+marks the module boot-resident (unload then requires a reboot). The subsequent
+installer **INSTALL** transaction runs in miwear and invokes the module's ABI 1.1
+publication callback, which idempotently installs the `Headphones` app and
+Launcher entry. Publication errors are retained in the registry and shown as a
+module error when Manager is opened. Crash-free activation, publication,
+discovery, pairing, connection, and test tone remain device gates on firmware
+`3.101.030`.
 
 ## Verification
 

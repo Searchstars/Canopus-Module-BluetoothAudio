@@ -14,11 +14,11 @@ Runtime flow (fail-closed):
 4. The supervisor verifies the CMI1 Ed25519 signature, exact target and
    firmware identity, artifact size, and SHA-256 digest, then registers the
    module as **installed and disabled**.
-5. Open Canopus Manager and enable the module. Enabling `insmod`s the verified
-   ELF; the module constructor runs `canopus_mod_prepare`, activation verifies
-   identity, installs the `Headphones` launcher app + LVX pages, registers
-   Bluetooth/SDP, and marks the module boot-resident, and the module is
-   reported active in the Manager.
+5. Open Canopus Manager and enable the module. After reboot and LOAD, the
+   constructor prepares and self-registers the descriptor as READY; the
+   supervisor immediately activates it and persists either BOOT_RESIDENT or the
+   callback error for later Manager display. The subsequent Canopus installer
+   **INSTALL** transaction publishes the module's `Headphones` app in miwear.
 
 ## Prerequisites on the device
 
@@ -49,20 +49,28 @@ Overrides:
 1. Build the watchface payloads (above).
 2. Install this watchface on the Band as a normal watchface.
 3. Open it once. Expected result: `Installed — disabled by default.`
-4. Open Canopus Manager, enable the **bluetooth_audio** module.
+4. Enable the module in Canopus Manager, reboot, press **LOAD**, then press
+   **INSTALL** in the Canopus installer. LOAD restores and automatically activates
+   the backend; INSTALL runs in miwear, reinstalls Manager idempotently, and
+   publishes the `Headphones` native app. Return to Manager to verify
+   BOOT_RESIDENT or inspect the retained module error. Packages produced by older
+   lifecycle-0 builds must be removed before this version is installed; do not
+   overwrite only the inbox ELF.
+
+The unsafe path is not used: `app_install` never runs from a Manager click or the
+backend Activate callback. Publication is an ABI 1.1 callback invoked only by the
+miwear-owned installer transaction. A publication failure is persisted for later
+Manager display.
 
 ## On-device test scope (device gates)
 
-Enabling the module installs the full headphone manager: `Headphones` launcher
-app, overview + detail LVX pages, Bluetooth discovery/adapter callbacks,
-L2CAP/AVDTP transport, SDP source, and the test tone. Each of these must be
-verified on firmware `3.101.030` before the module counts as working:
+Activation installs only the Bluetooth backend: discovery/adapter callbacks,
+L2CAP/AVDTP transport, SDP source, and the test tone. Each must be verified on
+firmware `3.101.030` before the module counts as working:
 
 - wrong-firmware rejection and clean failure before any registration;
-- launcher visibility, icon/name, open/close/reopen, overview/detail
-  navigation, page destruction, reboot behavior;
-- UI-owner dispatcher under live scan/connect updates — no LVX call from
-  Bluetooth/timer callbacks;
+- automatic boot activation returns promptly without Manager lag, corruption,
+  or reboot;
 - repeated scans with multiple headsets, dedup, overflow indicator, cancel;
 - bonded/unbonded selection, pairing prompts, AVDTP connect, failures/reconnect;
 - five-second audible test tone with correct start/suspend and no leaked

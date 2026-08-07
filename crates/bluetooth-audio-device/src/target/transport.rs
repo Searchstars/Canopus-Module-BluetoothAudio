@@ -55,20 +55,14 @@ pub fn schedule_initialize() -> Result<(), i32> {
         unsafe { bt_free(token as *mut core::ffi::c_void) };
         return Err(ERR_STATE);
     }
-    let result = unsafe {
+    unsafe {
         bt_queue_external(
             owner,
             sdp_work,
             bt_queue_free_addr(),
             token as *mut core::ffi::c_void,
             1,
-        )
-    };
-    if result != 0 {
-        r.transport_state
-            .store(TRANSPORT_DORMANT, Ordering::Release);
-        unsafe { bt_free(token as *mut core::ffi::c_void) };
-        return Err(ERR_ALLOC);
+        );
     }
     Ok(())
 }
