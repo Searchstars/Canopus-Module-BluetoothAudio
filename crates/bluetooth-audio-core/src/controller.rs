@@ -4,7 +4,9 @@ pub trait Platform {
     type Error;
     fn start_discovery(&mut self, timeout_seconds: u8) -> Result<(), Self::Error>;
     fn stop_discovery(&mut self) -> Result<(), Self::Error>;
-    fn is_bonded(&mut self, address: Address) -> Result<bool, Self::Error>;
+    /// Queries both target bond records and removes any local Classic record.
+    /// Returns `true` when pairing must wait for a removal callback.
+    fn prepare_bond(&mut self, address: Address) -> Result<bool, Self::Error>;
     fn create_bond(&mut self, address: Address) -> Result<(), Self::Error>;
     fn connect_avdtp(&mut self, address: Address) -> Result<(), Self::Error>;
     fn disconnect_avdtp(&mut self, address: Address) -> Result<(), Self::Error>;
@@ -35,7 +37,7 @@ impl<P: Platform> Controller<P> {
         self.model.scan = ScanState::Starting;
         self.model.last_error = 0;
         self.model.touch();
-        match self.platform.start_discovery(10) {
+        match self.platform.start_discovery(20) {
             Ok(()) => {
                 self.model.scan = ScanState::Scanning;
                 self.model.touch();
@@ -55,7 +57,14 @@ impl<P: Platform> Controller<P> {
         }
         self.model.scan = ScanState::Stopping;
         self.model.touch();
-        self.platform.stop_discovery()
+        match self.platform.stop_discovery() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.model.scan = ScanState::Scanning;
+                self.model.touch();
+                Err(error)
+            }
+        }
     }
 
     pub fn discovery_result(&mut self, device: DiscoveredDevice) {
@@ -89,7 +98,15 @@ impl<P: Platform> Controller<P> {
             self.model.connection = ConnectionState::WaitingForScanStop;
             self.model.scan = ScanState::Stopping;
             self.model.touch();
-            self.platform.stop_discovery()
+            match self.platform.stop_discovery() {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.model.scan = ScanState::Scanning;
+                    self.model.connection = ConnectionState::Failed;
+                    self.model.touch();
+                    Err(error)
+                }
+            }
         } else {
             self.begin_bond_or_connect()
         }
@@ -101,18 +118,49 @@ impl<P: Platform> Controller<P> {
             None => return Ok(()),
         };
         self.model.connection = ConnectionState::CheckingBond;
-        match self.platform.is_bonded(address)? {
-            true => {
-                self.model.connection = ConnectionState::Connecting;
+        self.model.touch();
+
+        // The exact target cannot safely infer that a retained local record is
+        // usable by the remote peer. Always query and remove it, then begin a
+        // fresh stock Classic bond. The NONE callback is the removal commit.
+        self.model.connection = ConnectionState::RemovingBond;
+        self.model.touch();
+        match self.platform.prepare_bond(address) {
+            Ok(true) => Ok(()),
+            Ok(false) => self.begin_pair(address),
+            Err(error) => {
+                self.model.connection = ConnectionState::Failed;
                 self.model.touch();
-                self.platform.connect_avdtp(address)
-            }
-            false => {
-                self.model.connection = ConnectionState::Pairing;
-                self.model.touch();
-                self.platform.create_bond(address)
+                Err(error)
             }
         }
+    }
+
+    fn begin_pair(&mut self, address: Address) -> Result<(), P::Error> {
+        self.model.connection = ConnectionState::Pairing;
+        self.model.touch();
+        match self.platform.create_bond(address) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.model.connection = ConnectionState::Failed;
+                self.model.touch();
+                Err(error)
+            }
+        }
+    }
+
+    pub fn bond_removed(&mut self, address: Address, success: bool) -> Result<(), P::Error> {
+        if self.model.selected.map(|peer| peer.address) != Some(address)
+            || self.model.connection != ConnectionState::RemovingBond
+        {
+            return Ok(());
+        }
+        if !success {
+            self.model.connection = ConnectionState::Failed;
+            self.model.touch();
+            return Ok(());
+        }
+        self.begin_pair(address)
     }
 
     pub fn bond_complete(&mut self, address: Address, success: bool) -> Result<(), P::Error> {
@@ -128,7 +176,14 @@ impl<P: Platform> Controller<P> {
         }
         self.model.connection = ConnectionState::Connecting;
         self.model.touch();
-        self.platform.connect_avdtp(address)
+        match self.platform.connect_avdtp(address) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.model.connection = ConnectionState::Failed;
+                self.model.touch();
+                Err(error)
+            }
+        }
     }
 
     pub fn connected(&mut self, address: Address) {

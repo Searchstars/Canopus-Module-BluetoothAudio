@@ -72,8 +72,9 @@ firmware `3.101.030` before the module counts as working:
 - wrong-firmware rejection and clean failure before any registration;
 - automatic boot activation returns promptly without Manager lag, corruption,
   or reboot;
-- repeated scans with multiple headsets, dedup, overflow indicator, cancel;
-- bonded/unbonded selection, pairing prompts, AVDTP connect, failures/reconnect;
+- repeated scans with multiple headsets, dedup, overflow indicator, cancel, and automatic in-place page updates without scroll reset;
+- for every selection: asynchronous scan-stop completion, separate aggregate/exact bond query, target-only local Classic bond removal when present, authoritative NONE confirmation, then a fresh stock bond;
+- Pair Request/Pair Display acceptance, SSP/link-key/authentication/encryption, authoritative BONDED handoff, AVDTP signaling/media connect, timeout and reconnect behavior;
 - five-second audible test tone with correct start/suspend and no leaked
   L2CAP/timer/SDP resources;
 - RESIDENT irreversibility: unload requires a reboot.

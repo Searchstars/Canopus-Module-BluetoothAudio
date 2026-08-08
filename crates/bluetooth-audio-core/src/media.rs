@@ -78,7 +78,7 @@ impl TonePacketizer {
         out[1] = 96 | if self.packets_sent == 0 { 0x80 } else { 0 };
         out[2..4].copy_from_slice(&self.sequence.to_be_bytes());
         out[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
-        out[8..12].copy_from_slice(&0x4341_4e50u32.to_be_bytes());
+        out[8..12].copy_from_slice(&0x4254_5036u32.to_be_bytes());
         out[12] = self.frames_per_packet;
         for chunk in out[13..length].chunks_exact_mut(FRAME_LENGTH) {
             chunk.copy_from_slice(&TEST_TONE_FRAME);

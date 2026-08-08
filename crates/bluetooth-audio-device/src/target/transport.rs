@@ -55,14 +55,20 @@ pub fn schedule_initialize() -> Result<(), i32> {
         unsafe { bt_free(token as *mut core::ffi::c_void) };
         return Err(ERR_STATE);
     }
-    unsafe {
+    let queued = unsafe {
         bt_queue_external(
             owner,
             sdp_work,
             bt_queue_free_addr(),
             token as *mut core::ffi::c_void,
             1,
-        );
+        )
+    };
+    if queued.is_null() {
+        unsafe { bt_free(token.cast()) };
+        r.last_error.store(ERR_SDP, Ordering::Release);
+        r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
+        return Err(ERR_SDP);
     }
     Ok(())
 }
@@ -138,21 +144,13 @@ fn submit_connect(address: &[u8; 6], expected: u32) -> Result<(), i32> {
     }
     unsafe {
         core::ptr::write_bytes(request, 0, CONNECT_REQUEST_SIZE);
-        core::ptr::write_unaligned(
-            request.add(CONNECT_PSM_OFFSET) as *mut u16,
-            AVDTP_SIGNALING_PSM,
-        );
+        configure_avdtp_connect_request(request);
         // flags at CONNECT_FLAGS_OFFSET stay 0.
         core::ptr::write_unaligned(
             request.add(CONNECT_CALLBACK_OFFSET) as *mut u32,
             l2cap_callback as *const () as usize as u32,
         );
         core::ptr::copy_nonoverlapping(address.as_ptr(), request.add(CONNECT_ADDRESS_OFFSET), 6);
-        core::ptr::write_unaligned(
-            request.add(CONNECT_CONFIG_OFFSET) as *mut u16,
-            AVDTP_L2CAP_CONFIG,
-        );
-        // options at CONNECT_OPTIONS_OFFSET stay 0.
     }
     if r.transport_state
         .compare_exchange(
@@ -169,9 +167,16 @@ fn submit_connect(address: &[u8; 6], expected: u32) -> Result<(), i32> {
     r.signaling_cid.store(0, Ordering::Release);
     r.signaling_mtu.store(0, Ordering::Release);
     r.last_error.store(0, Ordering::Release);
-    let result = unsafe { bt_l2cap_connect(request as *mut core::ffi::c_void) };
-    if result != 0 {
-        r.last_error.store(result, Ordering::Release);
+    let queued = unsafe { bt_l2cap_connect(request as *mut core::ffi::c_void) };
+    if queued == 0 {
+        r.last_error.store(ERR_STATE, Ordering::Release);
+        let _ = r.transport_state.compare_exchange(
+            TRANSPORT_CONNECTING,
+            expected,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        return Err(ERR_STATE);
     }
     Ok(())
 }
@@ -179,7 +184,11 @@ fn submit_connect(address: &[u8; 6], expected: u32) -> Result<(), i32> {
 /// Continues the AVDTP connection for `address` from READY (bonded) or from
 /// WAIT_BOND (bond just completed).
 pub fn connect(address: Address) -> Result<(), i32> {
-    let state = runtime().transport_state.load(Ordering::Acquire);
+    let r = runtime();
+    if r.media_state.load(Ordering::Acquire) != MEDIA_IDLE {
+        return Err(ERR_MEDIA_STATE);
+    }
+    let state = r.transport_state.load(Ordering::Acquire);
     match state {
         TRANSPORT_READY => submit_connect(&address.0, TRANSPORT_READY),
         TRANSPORT_WAIT_BOND if target_matches(address.0) => {
@@ -365,9 +374,24 @@ fn handle_stream_transition(core: &mut Core, before: SourceState, after: SourceS
             r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
             0
         }
-        (SourceState::Idle, _) => {
-            if r.media_cid.load(Ordering::Acquire) > 0x3f {
-                let _ = media_disconnect();
+        (_, SourceState::Idle) => {
+            let media_cid = r.media_cid.load(Ordering::Acquire);
+            if media_cid > 0x3f {
+                if media_disconnect().is_err() {
+                    media_cancel_timer();
+                    r.media_generation.fetch_add(1, Ordering::AcqRel);
+                    r.media_cid.store(0, Ordering::Release);
+                    r.media_mtu.store(0, Ordering::Release);
+                    r.media_state.store(MEDIA_IDLE, Ordering::Release);
+                }
+            } else if r.media_state.load(Ordering::Acquire) != MEDIA_IDLE {
+                // CLOSE/ABORT can arrive while the second L2CAP request is still
+                // connecting and therefore has no CID to disconnect. Invalidate
+                // that request's callback generation before allowing reconnect.
+                media_cancel_timer();
+                r.media_generation.fetch_add(1, Ordering::AcqRel);
+                r.media_mtu.store(0, Ordering::Release);
+                r.media_state.store(MEDIA_IDLE, Ordering::Release);
             }
             0
         }
@@ -375,16 +399,38 @@ fn handle_stream_transition(core: &mut Core, before: SourceState, after: SourceS
     }
 }
 
+fn queue_owned_callback(run: QueueWork, event: u8, argument: *mut core::ffi::c_void) -> bool {
+    let owner = unsafe { bt_l2cap_owner() };
+    if owner.is_null() {
+        return false;
+    }
+    let queued = unsafe { bt_queue_external(owner, run, bt_queue_free_addr(), argument, event) };
+    !queued.is_null()
+}
+
+extern "C" fn signaling_retry_work(
+    _owner_valid: i32,
+    event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    l2cap_callback_impl(event as u32, argument, true)
+}
+
 extern "C" fn l2cap_callback(event: u32, argument: *mut core::ffi::c_void) -> i32 {
+    l2cap_callback_impl(event, argument, false)
+}
+
+fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: bool) -> i32 {
     let r = runtime();
     if argument.is_null() {
         return 0;
     }
-    // Route the whole dispatch through the core lock so source + controller
-    // stay consistent. A busy lock drops the event rather than blocking.
-    let handled = try_with_core(|core| {
+    // Initial firmware callbacks never block the Bluetooth stack. If the core
+    // is busy, ownership moves to queued Bluetooth-owner work, where a short
+    // blocking acquisition guarantees the event is not discarded.
+    let dispatch = |core: &mut Core| {
         let packet = argument as *const u8;
-        match event {
+        let result = (|| match event {
             EVENT_CONNECTION_CONFIRM => {
                 let cid = unsafe { u16_at(packet, 0) };
                 let state = r.transport_state.load(Ordering::Acquire);
@@ -441,7 +487,18 @@ extern "C" fn l2cap_callback(event: u32, argument: *mut core::ffi::c_void) -> i3
                             return send;
                         }
                     }
-                    Err(_) => return ERR_PACKET,
+                    Err(error) => {
+                        let failure = if matches!(error, avdtp::Error::Rejected(_)) {
+                            ERR_REMOTE
+                        } else {
+                            ERR_PACKET
+                        };
+                        core.source.state = SourceState::Failed;
+                        sync_stream_state(core, SourceState::Failed);
+                        r.last_error.store(failure, Ordering::Release);
+                        r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
+                        return failure;
+                    }
                     Ok(_) => {}
                 }
                 handle_stream_transition(core, before, after)
@@ -466,10 +523,27 @@ extern "C" fn l2cap_callback(event: u32, argument: *mut core::ffi::c_void) -> i3
                 }
                 media_cancel_timer();
                 let media_state = r.media_state.load(Ordering::Acquire);
-                if r.media_cid.load(Ordering::Acquire) > 0x3f && media_state != MEDIA_DISCONNECTING
-                {
-                    let _ = media_disconnect();
+                let media_cid = r.media_cid.load(Ordering::Acquire);
+                let awaiting_media_disconnect = if media_cid > 0x3f {
+                    if media_state == MEDIA_DISCONNECTING {
+                        true
+                    } else {
+                        media_disconnect().is_ok()
+                    }
+                } else {
+                    false
+                };
+                if !awaiting_media_disconnect {
+                    // No live CID can produce a completion callback. Invalidate
+                    // any in-flight connect callback and finish teardown here.
+                    if media_state != MEDIA_IDLE {
+                        r.media_generation.fetch_add(1, Ordering::AcqRel);
+                    }
+                    r.media_cid.store(0, Ordering::Release);
+                    r.media_mtu.store(0, Ordering::Release);
+                    r.media_state.store(MEDIA_IDLE, Ordering::Release);
                 }
+                core.source.media_connected = false;
                 core.source = avdtp::Source::new(r.generation);
                 r.transport_state.store(TRANSPORT_READY, Ordering::Release);
                 if let Some(address) = target_load() {
@@ -479,10 +553,32 @@ extern "C" fn l2cap_callback(event: u32, argument: *mut core::ffi::c_void) -> i3
                 0
             }
             _ => ERR_STATE,
+        })();
+        if result != 0 {
+            r.last_error.store(result, Ordering::Release);
+            r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
+            core.source.state = SourceState::Failed;
+            sync_stream_state(core, SourceState::Failed);
         }
-    });
+        result
+    };
+    let handled = if blocking {
+        Some(with_core(dispatch))
+    } else {
+        try_with_core(dispatch)
+    };
+    if handled.is_some() {
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    if event <= u8::MAX as u32 && queue_owned_callback(signaling_retry_work, event as u8, argument)
+    {
+        return 0;
+    }
+    r.last_error.store(ERRNO_EBUSY, Ordering::Release);
+    r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
     unsafe { bt_free(argument) };
-    handled.unwrap_or(ERR_PACKET)
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -515,38 +611,74 @@ fn media_submit_connect() -> i32 {
         r.media_state.store(MEDIA_IDLE, Ordering::Release);
         return ERR_MEDIA_STATE;
     };
+    let media_generation = r.media_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    let callback = if media_generation & 1 == 0 {
+        media_l2cap_callback_even
+    } else {
+        media_l2cap_callback_odd
+    };
     unsafe {
         core::ptr::write_bytes(request, 0, CONNECT_REQUEST_SIZE);
-        core::ptr::write_unaligned(
-            request.add(CONNECT_PSM_OFFSET) as *mut u16,
-            AVDTP_SIGNALING_PSM,
-        );
+        configure_avdtp_connect_request(request);
         core::ptr::write_unaligned(
             request.add(CONNECT_CALLBACK_OFFSET) as *mut u32,
-            media_l2cap_callback as *const () as usize as u32,
+            callback as *const () as usize as u32,
         );
         core::ptr::copy_nonoverlapping(address.as_ptr(), request.add(CONNECT_ADDRESS_OFFSET), 6);
-        core::ptr::write_unaligned(
-            request.add(CONNECT_CONFIG_OFFSET) as *mut u16,
-            AVDTP_L2CAP_CONFIG,
-        );
     }
     r.media_cid.store(0, Ordering::Release);
     r.media_mtu.store(0, Ordering::Release);
-    let _ = r.media_generation.fetch_add(1, Ordering::AcqRel);
-    unsafe { bt_l2cap_connect(request as *mut core::ffi::c_void) };
+    let queued = unsafe { bt_l2cap_connect(request as *mut core::ffi::c_void) };
+    if queued == 0 {
+        r.last_error.store(ERR_MEDIA_STATE, Ordering::Release);
+        r.media_state.store(MEDIA_IDLE, Ordering::Release);
+        return ERR_MEDIA_STATE;
+    }
     0
 }
 
-extern "C" fn media_l2cap_callback(event: u32, argument: *mut core::ffi::c_void) -> i32 {
+extern "C" fn media_l2cap_callback_even(event: u32, argument: *mut core::ffi::c_void) -> i32 {
+    media_l2cap_callback_impl(event, argument, 0, false)
+}
+
+extern "C" fn media_l2cap_callback_odd(event: u32, argument: *mut core::ffi::c_void) -> i32 {
+    media_l2cap_callback_impl(event, argument, 1, false)
+}
+
+extern "C" fn media_retry_even(
+    _owner_valid: i32,
+    event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    media_l2cap_callback_impl(event as u32, argument, 0, true)
+}
+
+extern "C" fn media_retry_odd(
+    _owner_valid: i32,
+    event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    media_l2cap_callback_impl(event as u32, argument, 1, true)
+}
+
+fn media_l2cap_callback_impl(
+    event: u32,
+    argument: *mut core::ffi::c_void,
+    generation_parity: u32,
+    blocking: bool,
+) -> i32 {
     let r = runtime();
     if argument.is_null() {
         return 0;
     }
-    let handled = try_with_core(|core| {
+    if r.media_generation.load(Ordering::Acquire) & 1 != generation_parity {
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    let dispatch = |core: &mut Core| {
         let packet = argument as *const u8;
         let media_state = r.media_state.load(Ordering::Acquire);
-        match event {
+        let result = (|| match event {
             EVENT_CONNECTION_CONFIRM => {
                 let cid = unsafe { u16_at(packet, 0) };
                 if media_state != MEDIA_CONNECTING || cid <= 0x3f {
@@ -566,6 +698,7 @@ extern "C" fn media_l2cap_callback(event: u32, argument: *mut core::ffi::c_void)
                     let mtu = unsafe { u16_at(packet, EVENT_COMPLETE_MTU_OFFSET) };
                     r.media_mtu.store(mtu as u32, Ordering::Release);
                     r.media_state.store(MEDIA_CONNECTED, Ordering::Release);
+                    core.source.media_connected = true;
                     if core.source.state == SourceState::Open {
                         core.controller.stream_ready();
                     }
@@ -580,6 +713,7 @@ extern "C" fn media_l2cap_callback(event: u32, argument: *mut core::ffi::c_void)
                     return ERR_MEDIA_STATE;
                 }
                 media_cancel_timer();
+                core.source.media_connected = false;
                 r.media_cid.store(0, Ordering::Release);
                 r.media_mtu.store(0, Ordering::Release);
                 r.last_error.store(
@@ -590,10 +724,35 @@ extern "C" fn media_l2cap_callback(event: u32, argument: *mut core::ffi::c_void)
                 0
             }
             _ => ERR_MEDIA_STATE,
+        })();
+        if result != 0 {
+            r.last_error.store(result, Ordering::Release);
+            r.media_state.store(MEDIA_FAILED, Ordering::Release);
+            core.source.media_connected = false;
         }
-    });
+        result
+    };
+    let handled = if blocking {
+        Some(with_core(dispatch))
+    } else {
+        try_with_core(dispatch)
+    };
+    if handled.is_some() {
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    let retry = if generation_parity == 0 {
+        media_retry_even
+    } else {
+        media_retry_odd
+    };
+    if event <= u8::MAX as u32 && queue_owned_callback(retry, event as u8, argument) {
+        return 0;
+    }
+    r.last_error.store(ERRNO_EBUSY, Ordering::Release);
+    r.media_state.store(MEDIA_FAILED, Ordering::Release);
     unsafe { bt_free(argument) };
-    handled.unwrap_or(ERR_MEDIA_STATE)
+    0
 }
 
 fn media_disconnect() -> Result<(), i32> {
@@ -619,10 +778,10 @@ fn media_disconnect() -> Result<(), i32> {
 
 fn media_cancel_timer() {
     let r = runtime();
-    let mut handle = r.media_timer_handle.load(Ordering::Acquire);
+    let _ = r.media_timer_generation.fetch_add(1, Ordering::AcqRel);
+    let mut handle = r.media_timer_handle.swap(0, Ordering::AcqRel);
     if handle != 0 {
         unsafe { bt_timer_cancel(&mut handle) };
-        r.media_timer_handle.store(0, Ordering::Release);
     }
     r.media_flags.store(0, Ordering::Release);
 }
@@ -743,7 +902,8 @@ fn media_schedule_packet(core: &mut Core) -> i32 {
     if owner.is_null() {
         return ERR_MEDIA_TIMER;
     }
-    let token = unsafe { bt_alloc(4) } as *mut MediaTimerToken;
+    let token =
+        unsafe { bt_alloc(core::mem::size_of::<MediaTimerToken>() as u32) } as *mut MediaTimerToken;
     if token.is_null() {
         return ERR_MEDIA_ALLOC;
     }
@@ -751,7 +911,12 @@ fn media_schedule_packet(core: &mut Core) -> i32 {
         unsafe { bt_free(token as *mut core::ffi::c_void) };
         return ERR_MEDIA_STATE;
     };
-    unsafe { (*token).generation = r.generation };
+    unsafe {
+        token.write(MediaTimerToken {
+            generation: r.generation,
+            timer_generation: r.media_timer_generation.load(Ordering::Acquire),
+        });
+    }
     let delay_ms = packetizer.next_delay_ms();
     let handle = unsafe {
         bt_timer_add(
@@ -772,10 +937,27 @@ fn media_schedule_packet(core: &mut Core) -> i32 {
     0
 }
 
+extern "C" fn media_timer_retry_work(
+    _owner_valid: i32,
+    event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    media_timer_callback_impl(1, event, argument, true)
+}
+
 extern "C" fn media_timer_callback(
     owner_valid: i32,
     event: i32,
     argument: *mut core::ffi::c_void,
+) -> i32 {
+    media_timer_callback_impl(owner_valid, event, argument, false)
+}
+
+fn media_timer_callback_impl(
+    owner_valid: i32,
+    event: i32,
+    argument: *mut core::ffi::c_void,
+    blocking: bool,
 ) -> i32 {
     let r = runtime();
     if argument.is_null() {
@@ -783,12 +965,14 @@ extern "C" fn media_timer_callback(
         return 0;
     }
     let token = argument as *const MediaTimerToken;
-    if unsafe { (*token).generation } != r.generation {
+    if unsafe { (*token).generation } != r.generation
+        || unsafe { (*token).timer_generation } != r.media_timer_generation.load(Ordering::Acquire)
+    {
         unsafe { bt_free(argument) };
         return 0;
     }
     r.media_timer_handle.store(0, Ordering::Release);
-    let result = try_with_core(|core| {
+    let dispatch = |core: &mut Core| {
         if owner_valid == 0
             || event != MEDIA_TIMER_EVENT as i32
             || r.media_state.load(Ordering::Acquire) != MEDIA_STREAMING
@@ -815,11 +999,26 @@ extern "C" fn media_timer_callback(
         } else {
             media_schedule_packet(core)
         }
-    });
-    unsafe { bt_free(argument) };
-    if result.unwrap_or(ERR_MEDIA_STATE) != 0 {
-        r.media_state.store(MEDIA_FAILED, Ordering::Release);
+    };
+    let result = if blocking {
+        Some(with_core(dispatch))
+    } else {
+        try_with_core(dispatch)
+    };
+    if let Some(result) = result {
+        unsafe { bt_free(argument) };
+        if result != 0 {
+            r.media_state.store(MEDIA_FAILED, Ordering::Release);
+        }
+        return 0;
     }
+    if owner_valid != 0 && queue_owned_callback(media_timer_retry_work, MEDIA_TIMER_EVENT, argument)
+    {
+        return 0;
+    }
+    unsafe { bt_free(argument) };
+    r.last_error.store(ERRNO_EBUSY, Ordering::Release);
+    r.media_state.store(MEDIA_FAILED, Ordering::Release);
     0
 }
 

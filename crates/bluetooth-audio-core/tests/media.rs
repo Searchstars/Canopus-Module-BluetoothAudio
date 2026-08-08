@@ -9,6 +9,7 @@ fn packetizes_tone_with_rtp_progression() {
     let n = p.write_packet(&mut packet).unwrap();
     assert_eq!(n, 13 + 5 * FRAME_LENGTH);
     assert_eq!(packet[1] & 0x80, 0x80);
+    assert_eq!(&packet[8..12], &0x4254_5036u32.to_be_bytes());
     assert_eq!(&packet[13..13 + FRAME_LENGTH], &TEST_TONE_FRAME);
     assert_eq!(p.sequence, 2);
     assert_eq!(p.timestamp, 640);
