@@ -69,6 +69,48 @@ fn negotiates_real_peer_bitpool_39_and_emits_set_configuration() {
 }
 
 #[test]
+fn records_sink_delay_and_restarts_after_suspend() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    source.connected(&mut out).unwrap();
+    source.receive(&[0x02, 0x01, 0x08, 0x08], &mut out).unwrap();
+    source
+        .receive(
+            &[0x12, 0x0c, 1, 0, 7, 6, 0, 0, 0x22, 0x15, 27, 53, 8, 0],
+            &mut out,
+        )
+        .unwrap();
+    source.receive(&[0x22, 0x03], &mut out).unwrap();
+    source.receive(&[0x32, 0x06], &mut out).unwrap();
+    assert_eq!(source.state, State::Open);
+
+    let n = source
+        .receive(&[0x70, 0x0d, 0x04, 0x05, 0xdc], &mut out)
+        .unwrap();
+    assert_eq!(&out[..n], &[0x72, 0x0d]);
+    assert_eq!(source.reported_delay_100us, 1_500);
+
+    source.media_connected = true;
+    let n = source.start(&mut out).unwrap();
+    let transaction = out[0] >> 4;
+    assert_eq!(out[1], 0x07);
+    assert!(n > 0);
+    source
+        .receive(&[(transaction << 4) | 0x02, 0x07], &mut out)
+        .unwrap();
+    assert_eq!(source.state, State::Streaming);
+
+    source.suspend(&mut out).unwrap();
+    let transaction = out[0] >> 4;
+    source
+        .receive(&[(transaction << 4) | 0x02, 0x09], &mut out)
+        .unwrap();
+    assert_eq!(source.state, State::Open);
+    assert!(source.start(&mut out).is_ok());
+    assert_eq!(source.state, State::Starting);
+}
+
+#[test]
 fn reassembles_fragmented_capabilities() {
     let mut source = Source::new(1);
     let mut out = [0u8; 64];

@@ -7,8 +7,11 @@ the only action required.
 
 Runtime flow (fail-closed):
 
-1. Validate the packaged receipt shape and ELF bounds.
-2. Copy `receipt.bin` and `module.bin` to `/data/canopus/inbox/`.
+1. Validate the packaged receipt shape and ELF bounds, then derive an audio-only
+   MP3 test resource by removing the 1.13 MiB ID3 artwork from
+   `long_test_audio.bin` without transcoding its audio frames.
+2. Copy `receipt.bin` and `module.bin` to `/data/canopus/inbox/`, and copy the
+   derived stream to `/data/canopus/tmp_btaudio_module_long_audio_test.mp3`.
 3. Send a bounded CPC2 `INSTALL` request containing only the `bluetooth_audio`
    token.
 4. The supervisor verifies the CMI1 Ed25519 signature, exact target and
@@ -38,7 +41,7 @@ This cross-builds the module, runs the Canopus ELF verifier, signs the CMI1
 receipt with the local dev key, and stages `module.bin` + `receipt.bin` here.
 Overrides:
 
-- `CANOPUS_ROOT=/path/to/Canopus` — framework root (default `/Volumes/EXT0/Canopus`).
+- `CANOPUS_ROOT=/path/to/Canopus` — framework root (default `../Canopus`).
 - `MODULE_INSTALL_KEY=/path/to/key.pem` — signer (default
   `<CANOPUS_ROOT>/.canopus-local/module-installer-ed25519.pem`).
 
@@ -65,8 +68,8 @@ persisted for later Manager display.
 
 ## On-device test scope (device gates)
 
-Activation installs only the Bluetooth backend: discovery/adapter callbacks,
-L2CAP/AVDTP transport, SDP source, and the test tone. Each must be verified on
+Activation installs the Bluetooth backend and audio endpoint: discovery/adapter callbacks,
+L2CAP/AVDTP transport, SDP source, the test tone, and the packaged long-MP3 test. Each must be verified on
 firmware `3.101.030` before the module counts as working:
 
 - wrong-firmware rejection and clean failure before any registration;
@@ -75,8 +78,9 @@ firmware `3.101.030` before the module counts as working:
 - repeated scans with multiple headsets, dedup, overflow indicator, cancel, and automatic in-place page updates without scroll reset;
 - for every selection: asynchronous scan-stop completion, separate aggregate/exact bond query, target-only local Classic bond removal when present, authoritative NONE confirmation, then a fresh stock bond;
 - Pair Request/Pair Display acceptance, SSP/link-key/authentication/encryption, authoritative BONDED handoff, AVDTP signaling/media connect, timeout and reconnect behavior;
-- five-second audible test tone with correct start/suspend and no leaked
-  L2CAP/timer/SDP resources;
+- five-second audible test tone and the separate packaged 96-second real-MP3 test,
+  including 24→44.1-kHz resampling, correct drain/release, and repeat playback
+  without leaked L2CAP/timer/file resources;
 - RESIDENT irreversibility: unload requires a reboot.
 
 Host tests and a verifier-clean ELF are not a substitute for these on-device

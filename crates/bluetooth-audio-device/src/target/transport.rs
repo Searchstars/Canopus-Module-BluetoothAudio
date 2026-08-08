@@ -18,8 +18,8 @@ use canopus_bluetooth_audio_core::{
     media,
 };
 
-use super::bluetooth;
 use super::runtime::*;
+use super::{audio_device, audio_stream, bluetooth};
 
 const MEDIA_TIMER_EVENT: u8 = 9;
 const MEDIA_TIMER_TAG: &[u8] = b"A2DPM\0";
@@ -336,6 +336,10 @@ fn send_media(sdu: &[u8]) -> i32 {
     0
 }
 
+pub(super) fn send_audio_media(sdu: &[u8]) -> i32 {
+    send_media(sdu)
+}
+
 /// Maps the AVDTP source state into the UI model's stream state.
 fn sync_stream_state(core: &mut Core, state: SourceState) {
     core.controller.model.stream = match state {
@@ -358,7 +362,13 @@ fn handle_stream_transition(core: &mut Core, before: SourceState, after: SourceS
     let r = runtime();
     match (before, after) {
         (SourceState::Opening, SourceState::Open) => media_submit_connect(),
-        (SourceState::Starting, SourceState::Streaming) => media_begin_tone(core),
+        (SourceState::Starting, SourceState::Streaming) => {
+            if r.media_flags.load(Ordering::Acquire) & MEDIA_FLAG_EXTERNAL_STREAM != 0 {
+                audio_stream::begin(core, audio_device::input().generation())
+            } else {
+                media_begin_tone(core)
+            }
+        }
         (SourceState::Open, SourceState::Streaming) => {
             // Remote START. Ensure the media channel is ready, then begin.
             let media_state = r.media_state.load(Ordering::Acquire);
@@ -366,11 +376,25 @@ fn handle_stream_transition(core: &mut Core, before: SourceState, after: SourceS
                 return ERR_MEDIA_STATE;
             }
             r.media_state.store(MEDIA_STARTING, Ordering::Release);
-            media_begin_tone(core)
+            if r.media_flags.load(Ordering::Acquire) & MEDIA_FLAG_EXTERNAL_STREAM != 0 {
+                audio_stream::begin(core, audio_device::input().generation())
+            } else {
+                media_begin_tone(core)
+            }
         }
         (SourceState::Streaming, SourceState::Open) => {
-            // SUSPEND accepted; tone complete.
+            // SUSPEND accepted; the producer will issue START again when data is
+            // available. Both media timers are generation-cancelled here.
+            let external = r.media_flags.load(Ordering::Acquire) & MEDIA_FLAG_EXTERNAL_STREAM != 0;
             media_cancel_timer();
+            audio_stream::cancel_timer();
+            if external {
+                r.media_flags
+                    .fetch_or(MEDIA_FLAG_EXTERNAL_STREAM, Ordering::AcqRel);
+                let input = audio_device::input();
+                input.mark_underrun(input.generation());
+                let _ = audio_stream::schedule_wake();
+            }
             r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
             0
         }
@@ -379,6 +403,7 @@ fn handle_stream_transition(core: &mut Core, before: SourceState, after: SourceS
             if media_cid > 0x3f {
                 if media_disconnect().is_err() {
                     media_cancel_timer();
+                    audio_stream::cancel_timer();
                     r.media_generation.fetch_add(1, Ordering::AcqRel);
                     r.media_cid.store(0, Ordering::Release);
                     r.media_mtu.store(0, Ordering::Release);
@@ -389,6 +414,7 @@ fn handle_stream_transition(core: &mut Core, before: SourceState, after: SourceS
                 // connecting and therefore has no CID to disconnect. Invalidate
                 // that request's callback generation before allowing reconnect.
                 media_cancel_timer();
+                audio_stream::cancel_timer();
                 r.media_generation.fetch_add(1, Ordering::AcqRel);
                 r.media_mtu.store(0, Ordering::Release);
                 r.media_state.store(MEDIA_IDLE, Ordering::Release);
@@ -406,6 +432,14 @@ fn queue_owned_callback(run: QueueWork, event: u8, argument: *mut core::ffi::c_v
     }
     let queued = unsafe { bt_queue_external(owner, run, bt_queue_free_addr(), argument, event) };
     !queued.is_null()
+}
+
+pub(super) fn queue_audio_retry(
+    run: QueueWork,
+    event: u8,
+    argument: *mut core::ffi::c_void,
+) -> bool {
+    queue_owned_callback(run, event, argument)
 }
 
 extern "C" fn signaling_retry_work(
@@ -523,6 +557,7 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
                     r.last_error.store(ERR_REMOTE, Ordering::Release);
                 }
                 media_cancel_timer();
+                audio_stream::transport_lost(ERR_MEDIA_REMOTE);
                 let media_state = r.media_state.load(Ordering::Acquire);
                 let media_cid = r.media_cid.load(Ordering::Acquire);
                 let awaiting_media_disconnect = if media_cid > 0x3f {
@@ -700,7 +735,39 @@ fn media_l2cap_callback_impl(
                     r.media_mtu.store(mtu as u32, Ordering::Release);
                     r.media_state.store(MEDIA_CONNECTED, Ordering::Release);
                     core.source.media_connected = true;
-                    if core.source.state == SourceState::Open {
+                    let start_pending = r
+                        .media_flags
+                        .fetch_and(!MEDIA_FLAG_START_WHEN_CONNECTED, Ordering::AcqRel)
+                        & MEDIA_FLAG_START_WHEN_CONNECTED
+                        != 0;
+                    if start_pending {
+                        match core.source.state {
+                            SourceState::Open => {
+                                if let Err(error) =
+                                    submit_tone_start(&mut core.source, &mut core.signaling_out)
+                                {
+                                    return error;
+                                }
+                            }
+                            SourceState::Streaming => {
+                                r.media_state.store(MEDIA_STARTING, Ordering::Release);
+                                let result = if r.media_flags.load(Ordering::Acquire)
+                                    & MEDIA_FLAG_EXTERNAL_STREAM
+                                    != 0
+                                {
+                                    audio_stream::begin(core, audio_device::input().generation())
+                                } else {
+                                    media_begin_tone(core)
+                                };
+                                if result != 0 {
+                                    return result;
+                                }
+                                core.controller.model.stream = StreamState::Streaming;
+                                core.controller.model.touch();
+                            }
+                            _ => return ERR_MEDIA_STATE,
+                        }
+                    } else if core.source.state == SourceState::Open {
                         core.controller.stream_ready();
                     }
                 }
@@ -714,6 +781,7 @@ fn media_l2cap_callback_impl(
                     return ERR_MEDIA_STATE;
                 }
                 media_cancel_timer();
+                audio_stream::transport_lost(ERR_MEDIA_REMOTE);
                 core.source.media_connected = false;
                 r.media_cid.store(0, Ordering::Release);
                 r.media_mtu.store(0, Ordering::Release);
@@ -768,6 +836,7 @@ fn media_disconnect() -> Result<(), i32> {
         return Err(ERR_MEDIA_ALLOC);
     }
     media_cancel_timer();
+    audio_stream::cancel_timer();
     unsafe {
         (*request).private_cid = r.media_cid.load(Ordering::Acquire) as u16;
         (*request).caller_tag = 0;
@@ -788,20 +857,144 @@ fn media_cancel_timer() {
 }
 
 // ---------------------------------------------------------------------------
+// External audio stream
+// ---------------------------------------------------------------------------
+
+pub fn start_audio(core: &mut Core, generation: u32) -> Result<(), i32> {
+    let r = runtime();
+    if audio_device::input().generation() != generation
+        || r.media_timer_handle.load(Ordering::Acquire) != 0
+    {
+        return Err(ERR_MEDIA_STATE);
+    }
+    let source_state = core.source.state;
+    if source_state != SourceState::Open && source_state != SourceState::Streaming {
+        return Err(ERR_MEDIA_STATE);
+    }
+    r.media_flags
+        .fetch_or(MEDIA_FLAG_EXTERNAL_STREAM, Ordering::AcqRel);
+    match r.media_state.load(Ordering::Acquire) {
+        MEDIA_CONNECTED | MEDIA_COMPLETE if source_state == SourceState::Open => {
+            submit_tone_start(&mut core.source, &mut core.signaling_out)
+        }
+        MEDIA_CONNECTED | MEDIA_COMPLETE | MEDIA_STREAMING
+            if source_state == SourceState::Streaming =>
+        {
+            r.media_state.store(MEDIA_STREAMING, Ordering::Release);
+            let result = audio_stream::begin(core, generation);
+            if result == 0 { Ok(()) } else { Err(result) }
+        }
+        MEDIA_IDLE => {
+            r.media_flags
+                .fetch_or(MEDIA_FLAG_START_WHEN_CONNECTED, Ordering::AcqRel);
+            let result = media_submit_connect();
+            if result != 0 {
+                r.media_flags.fetch_and(
+                    !(MEDIA_FLAG_START_WHEN_CONNECTED | MEDIA_FLAG_EXTERNAL_STREAM),
+                    Ordering::AcqRel,
+                );
+                return Err(result);
+            }
+            Ok(())
+        }
+        MEDIA_CONNECTING | MEDIA_STARTING => {
+            r.media_flags
+                .fetch_or(MEDIA_FLAG_START_WHEN_CONNECTED, Ordering::AcqRel);
+            Ok(())
+        }
+        _ => {
+            r.media_flags
+                .fetch_and(!MEDIA_FLAG_EXTERNAL_STREAM, Ordering::AcqRel);
+            Err(ERR_MEDIA_STATE)
+        }
+    }
+}
+
+pub fn complete_audio(core: &mut Core) {
+    let r = runtime();
+    audio_stream::cancel_timer();
+    r.media_flags.fetch_and(
+        !(MEDIA_FLAG_EXTERNAL_STREAM | MEDIA_FLAG_START_WHEN_CONNECTED),
+        Ordering::AcqRel,
+    );
+    if core.source.state == SourceState::Streaming {
+        r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
+        core.controller.model.stream = StreamState::Open;
+        core.controller.model.touch();
+    }
+}
+
+pub fn audio_failed(_generation: u32) {
+    let r = runtime();
+    audio_stream::cancel_timer();
+    r.media_flags.fetch_and(
+        !(MEDIA_FLAG_EXTERNAL_STREAM | MEDIA_FLAG_START_WHEN_CONNECTED),
+        Ordering::AcqRel,
+    );
+    if r.media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
+        r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
+    }
+    with_core(|core| {
+        if core.source.state == SourceState::Open || core.source.state == SourceState::Streaming {
+            core.controller.model.stream = StreamState::Open;
+            core.controller.model.touch();
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Test tone
 // ---------------------------------------------------------------------------
 
-/// Builds and sends the AVDTP START for the test tone. Called from the UI
-/// action while the core lock is already held.
-pub fn play_tone(source: &mut avdtp::Source, out: &mut [u8]) -> Result<(), i32> {
+/// Starts immediately when the media channel is live, or reconnects a media
+/// channel that the peer closed after the previous tone. After the first
+/// accepted START, later tones continue on that live AVDTP stream rather than
+/// depending on a peer-specific SUSPEND/START round trip.
+pub fn play_tone(core: &mut Core) -> Result<(), i32> {
     let r = runtime();
-    let media_state = r.media_state.load(Ordering::Acquire);
-    if media_state != MEDIA_CONNECTED && media_state != MEDIA_COMPLETE {
+    if r.media_timer_handle.load(Ordering::Acquire) != 0
+        || r.media_flags.load(Ordering::Acquire) & MEDIA_FLAG_EXTERNAL_STREAM != 0
+    {
         return Err(ERR_MEDIA_STATE);
     }
-    if source.state != SourceState::Open
+    let source_state = core.source.state;
+    if source_state != SourceState::Open && source_state != SourceState::Streaming {
+        return Err(ERR_MEDIA_STATE);
+    }
+    match r.media_state.load(Ordering::Acquire) {
+        MEDIA_CONNECTED | MEDIA_COMPLETE if source_state == SourceState::Open => {
+            submit_tone_start(&mut core.source, &mut core.signaling_out)
+        }
+        MEDIA_CONNECTED | MEDIA_COMPLETE => {
+            r.media_state.store(MEDIA_STARTING, Ordering::Release);
+            let result = media_begin_tone(core);
+            if result == 0 { Ok(()) } else { Err(result) }
+        }
+        MEDIA_IDLE => {
+            r.media_flags
+                .fetch_or(MEDIA_FLAG_START_WHEN_CONNECTED, Ordering::AcqRel);
+            let result = media_submit_connect();
+            if result != 0 {
+                r.media_flags
+                    .fetch_and(!MEDIA_FLAG_START_WHEN_CONNECTED, Ordering::AcqRel);
+                return Err(result);
+            }
+            Ok(())
+        }
+        MEDIA_CONNECTING => {
+            r.media_flags
+                .fetch_or(MEDIA_FLAG_START_WHEN_CONNECTED, Ordering::AcqRel);
+            Ok(())
+        }
+        _ => Err(ERR_MEDIA_STATE),
+    }
+}
+
+fn submit_tone_start(source: &mut avdtp::Source, out: &mut [u8]) -> Result<(), i32> {
+    let r = runtime();
+    let media_state = r.media_state.load(Ordering::Acquire);
+    if (media_state != MEDIA_CONNECTED && media_state != MEDIA_COMPLETE)
         || r.media_cid.load(Ordering::Acquire) <= 0x3f
-        || r.media_timer_handle.load(Ordering::Acquire) != 0
     {
         return Err(ERR_MEDIA_STATE);
     }
@@ -846,25 +1039,40 @@ fn media_begin_tone(core: &mut Core) -> i32 {
     };
     core.packetizer = Some(packetizer);
     r.media_state.store(MEDIA_STREAMING, Ordering::Release);
+    let startup_packets = core
+        .packetizer
+        .as_ref()
+        .map(|packetizer| packetizer.startup_packets(core.source.reported_delay_100us))
+        .unwrap_or(1);
     let result = {
-        let out = core.media_out.as_mut_slice();
-        let packet_len = match core.packetizer.as_mut() {
-            Some(packetizer) => match packetizer.write_packet(out) {
-                Ok(len) => len,
-                Err(_) => return ERR_MEDIA_PACKET,
-            },
-            None => return ERR_MEDIA_STATE,
-        };
-        let send = send_media(&out[..packet_len]);
-        if send != 0 {
-            return send;
+        for _ in 0..startup_packets {
+            let out = core.media_out.as_mut_slice();
+            let packet_len = match core.packetizer.as_mut() {
+                Some(packetizer) => match packetizer.write_packet(out) {
+                    Ok(len) => len,
+                    Err(_) => return ERR_MEDIA_PACKET,
+                },
+                None => return ERR_MEDIA_STATE,
+            };
+            let send = send_media(&out[..packet_len]);
+            if send != 0 {
+                return send;
+            }
+            if core.packetizer.as_ref().is_some_and(|p| p.is_complete()) {
+                break;
+            }
         }
         let complete = core.packetizer.as_ref().is_some_and(|p| p.is_complete());
         sync_media_counters(core, r);
         if complete {
-            media_finish_tone(core)
+            media_schedule_finish(core)
         } else {
-            media_schedule_packet(core)
+            let delay_ms = core
+                .packetizer
+                .as_mut()
+                .map(|packetizer| packetizer.startup_catchup_delay_ms(startup_packets))
+                .unwrap_or(1);
+            media_schedule_packet_after(delay_ms)
         }
     };
     if result != 0 {
@@ -893,6 +1101,29 @@ fn sync_media_counters(core: &mut Core, r: &Runtime) {
 }
 
 fn media_schedule_packet(core: &mut Core) -> i32 {
+    let Some(packetizer) = core.packetizer.as_mut() else {
+        return ERR_MEDIA_STATE;
+    };
+    media_schedule_packet_after(packetizer.next_delay_ms())
+}
+
+fn media_schedule_finish(core: &mut Core) -> i32 {
+    let r = runtime();
+    let Some(packetizer) = core.packetizer.as_mut() else {
+        return ERR_MEDIA_STATE;
+    };
+    let delay_ms = packetizer.presentation_drain_delay_ms(core.source.reported_delay_100us);
+    r.media_flags
+        .fetch_or(MEDIA_FLAG_FINISH_ON_TIMER, Ordering::AcqRel);
+    let result = media_schedule_packet_after(delay_ms);
+    if result != 0 {
+        r.media_flags
+            .fetch_and(!MEDIA_FLAG_FINISH_ON_TIMER, Ordering::AcqRel);
+    }
+    result
+}
+
+fn media_schedule_packet_after(delay_ms: u32) -> i32 {
     let r = runtime();
     if r.media_timer_handle.load(Ordering::Acquire) != 0
         || r.media_state.load(Ordering::Acquire) != MEDIA_STREAMING
@@ -908,21 +1139,16 @@ fn media_schedule_packet(core: &mut Core) -> i32 {
     if token.is_null() {
         return ERR_MEDIA_ALLOC;
     }
-    let Some(packetizer) = core.packetizer.as_mut() else {
-        unsafe { bt_free(token as *mut core::ffi::c_void) };
-        return ERR_MEDIA_STATE;
-    };
     unsafe {
         token.write(MediaTimerToken {
             generation: r.generation,
             timer_generation: r.media_timer_generation.load(Ordering::Acquire),
         });
     }
-    let delay_ms = packetizer.next_delay_ms();
     let handle = unsafe {
         bt_timer_add(
             owner,
-            delay_ms,
+            delay_ms.max(1),
             MEDIA_TIMER_EVENT,
             media_timer_callback as *const () as *mut core::ffi::c_void,
             token as *mut core::ffi::c_void,
@@ -972,14 +1198,21 @@ fn media_timer_callback_impl(
         unsafe { bt_free(argument) };
         return 0;
     }
-    r.media_timer_handle.store(0, Ordering::Release);
     let dispatch = |core: &mut Core| {
+        r.media_timer_handle.store(0, Ordering::Release);
         if owner_valid == 0
             || event != MEDIA_TIMER_EVENT as i32
             || r.media_state.load(Ordering::Acquire) != MEDIA_STREAMING
             || core.source.state != SourceState::Streaming
         {
             return ERR_MEDIA_STATE;
+        }
+        if r.media_flags
+            .fetch_and(!MEDIA_FLAG_FINISH_ON_TIMER, Ordering::AcqRel)
+            & MEDIA_FLAG_FINISH_ON_TIMER
+            != 0
+        {
+            return media_complete_tone(core);
         }
         let out = core.media_out.as_mut_slice();
         let packet_len = match core.packetizer.as_mut() {
@@ -996,7 +1229,7 @@ fn media_timer_callback_impl(
         let complete = core.packetizer.as_ref().is_some_and(|p| p.is_complete());
         sync_media_counters(core, r);
         if complete {
-            media_finish_tone(core)
+            media_schedule_finish(core)
         } else {
             media_schedule_packet(core)
         }
@@ -1023,19 +1256,14 @@ fn media_timer_callback_impl(
     0
 }
 
-/// Sends AVDTP SUSPEND after the last tone packet.
-fn media_finish_tone(core: &mut Core) -> i32 {
-    let out = core.signaling_out.as_mut_slice();
-    let len = match core.source.suspend(out) {
-        Ok(len) if len > 0 => len,
-        _ => return ERR_MEDIA_STATE,
-    };
+/// Completes one tone while leaving the accepted AVDTP stream active. Reusing
+/// the stream avoids depending on peer-specific SUSPEND response timing and is
+/// the same lifecycle needed by a later continuous music producer.
+fn media_complete_tone(core: &mut Core) -> i32 {
     let r = runtime();
-    r.media_state.store(MEDIA_SUSPENDING, Ordering::Release);
-    let send = send_signaling(&out[..len]);
-    if send != 0 {
-        r.last_error.store(send, Ordering::Release);
-        return ERR_MEDIA_PACKET;
-    }
+    core.packetizer = None;
+    r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
+    core.controller.model.stream = StreamState::Open;
+    core.controller.model.touch();
     0
 }

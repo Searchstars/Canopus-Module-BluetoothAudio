@@ -1,0 +1,10 @@
+[package]
+name = "nanomp3"
+version = "0.1.1-canopus.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Canopus-vendored nanomp3 with caller-owned decode scratch"
+repository = "https://github.com/robbie01/nanomp3"
+
+[lib]
+path = "src/lib.rs"

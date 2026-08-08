@@ -1,5 +1,7 @@
+schema = 1
+
 [module]
-id = "bluetooth_audio"
+id = "org.canopus.bluetooth-audio"
 version = "0.1.0"
 language = "rust"
 lifecycle = "resident-after-activation"

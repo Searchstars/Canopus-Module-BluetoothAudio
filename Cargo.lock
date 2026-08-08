@@ -11,6 +11,7 @@ name = "canopus-bluetooth-audio-core"
 version = "0.1.0"
 dependencies = [
  "canopus-ui-core",
+ "nanomp3",
 ]
 
 [[package]]
@@ -20,7 +21,6 @@ dependencies = [
  "canopus-abi",
  "canopus-bluetooth-audio-core",
  "canopus-runtime",
- "canopus-target-generated",
  "canopus-target-private",
  "canopus-ui-core",
 ]
@@ -49,3 +49,7 @@ dependencies = [
 [[package]]
 name = "canopus-ui-core"
 version = "0.1.0"
+
+[[package]]
+name = "nanomp3"
+version = "0.1.1-canopus.1"

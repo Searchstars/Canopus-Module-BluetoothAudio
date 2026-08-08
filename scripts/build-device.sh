@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-CANOPUS=${CANOPUS_ROOT:-/Volumes/EXT0/Canopus}
-OUT="$ROOT/build"
-TRIPLE=thumbv8m.main-none-eabi
+CANOPUS=${CANOPUS_ROOT:-"$ROOT/../Canopus"}
+TARGET_ID=${CANOPUS_TARGET:-xiaomi-band-10-pro-3.101.030}
+TARGET_PROFILE="$ROOT/targets/$TARGET_ID.env"
+[ -f "$TARGET_PROFILE" ] || {
+  echo "error: unsupported module target: $TARGET_ID" >&2
+  exit 1
+}
+# Repository-owned profile: Rust feature, LLVM target, CPU, and loader bound.
+. "$TARGET_PROFILE"
+OUT=${CANOPUS_BUILD_OUT:-"$ROOT/build/$TARGET_ID"}
+TRIPLE=$RUST_TARGET_TRIPLE
 CC=${CC:-clang}
 mkdir -p "$OUT"
 
@@ -17,8 +25,9 @@ mkdir -p "$OUT"
 # RUSTFLAGS replaces the [target.*] flags in .cargo/config.toml, so panic=abort
 # and target-cpu are repeated here.
 NIGHTLY=${NIGHTLY_CARGO:-cargo +nightly}
-LEAN_RUSTFLAGS="-C panic=abort -C target-cpu=cortex-m33 -Z unstable-options \
-  -Z function-sections=no -C symbol-mangling-version=hashed"
+LEAN_RUSTFLAGS="-C panic=abort -C target-cpu=$RUST_TARGET_CPU -Z unstable-options \
+  -Z function-sections=no -C symbol-mangling-version=hashed \
+  -Z location-detail=none -Z fmt-debug=none"
 
 cargo fmt --manifest-path "$ROOT/Cargo.toml" --all -- --check
 cargo clippy --manifest-path "$ROOT/Cargo.toml" --workspace --all-targets -- -D warnings
@@ -27,22 +36,24 @@ cargo test --manifest-path "$ROOT/Cargo.toml" --workspace
 # word-split so `+nightly` is passed to the rustup cargo proxy.
 RUSTFLAGS="$LEAN_RUSTFLAGS" $NIGHTLY clippy \
   --manifest-path "$ROOT/Cargo.toml" --release --target "$TRIPLE" \
-  -p canopus-bluetooth-audio-device --features device -- -D warnings
+  -p canopus-bluetooth-audio-device --no-default-features \
+  --features "$RUST_TARGET_FEATURE" -- -D warnings
 RUSTFLAGS="$LEAN_RUSTFLAGS" $NIGHTLY build \
   --manifest-path "$ROOT/Cargo.toml" --release --target "$TRIPLE" \
-  -p canopus-bluetooth-audio-device --features device
+  -p canopus-bluetooth-audio-device --no-default-features \
+  --features "$RUST_TARGET_FEATURE"
 
-"$CC" --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -mfloat-abi=soft \
+"$CC" --target=arm-none-eabi -mcpu="$RUST_TARGET_CPU" -mthumb -mfloat-abi=soft \
   -ffreestanding -fno-common -fno-builtin -fno-stack-protector \
   -fno-unwind-tables -fno-asynchronous-unwind-tables \
   -fdata-sections -ffunction-sections -Os -Wall -Wextra -Werror \
   -I"$CANOPUS/sdk/c" \
   -c "$ROOT/crates/bluetooth-audio-device/c_shim/canopus_ctor.c" \
   -o "$OUT/canopus_ctor.o"
+"$ROOT/scripts/compile-sbc.sh" "$OUT" "$CC" "$RUST_TARGET_CPU"
 
-ld.lld -r "$OUT/canopus_ctor.o" \
-  "$ROOT/target/$TRIPLE/release/libcanopus_bluetooth_audio_device.a" \
-  -o "$OUT/bluetooth-audio.elf"
+"$ROOT/scripts/link-device.sh" \
+  "$OUT" "$CC" "$RUST_TARGET_CPU" "$CANOPUS" "$TARGET_ID" "$ROOT" "$TRIPLE"
 
 # Drop the unconsumed thin-LTO bitcode (.llvmbc) and debug metadata; neither is
 # part of the loaded image. objcopy cannot write in place, so write a temp.
@@ -54,5 +65,5 @@ if [ -n "$OBJCOPY" ]; then
 fi
 
 "$CANOPUS/target/debug/canopus" verify "$OUT/bluetooth-audio.elf" \
-  --target xiaomi-band-10-pro-3.101.030 --targets-dir "$CANOPUS/targets"
-"$ROOT/scripts/verify-device.sh" "$OUT/bluetooth-audio.elf"
+  --target "$TARGET_ID" --targets-dir "$CANOPUS/targets"
+"$ROOT/scripts/verify-device.sh" "$OUT/bluetooth-audio.elf" "$MODULE_MAX_SIZE"

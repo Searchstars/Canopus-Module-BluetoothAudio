@@ -4,6 +4,7 @@ members = [
     "crates/bluetooth-audio-core",
     "crates/bluetooth-audio-device",
 ]
+exclude = ["third_party/nanomp3"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +18,6 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 opt-level = "z"
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = "debuginfo"

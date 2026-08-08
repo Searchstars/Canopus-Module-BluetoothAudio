@@ -17,6 +17,24 @@ const fn pack<const N: usize>(value: &[u8]) -> [u8; N] {
     out
 }
 
+#[cfg(feature = "device")]
+const MODULE_TARGET_ID: &[u8] = canopus_target_private::TARGET_ID.as_bytes();
+#[cfg(not(feature = "device"))]
+const MODULE_TARGET_ID: &[u8] = b"host-test";
+
+#[cfg(feature = "device")]
+#[repr(C)]
+struct ModuleRegistrationV1 {
+    magic: u32,
+    descriptor: u32,
+    module_id: [u8; 32],
+}
+
+#[cfg(feature = "device")]
+const REGISTRATION_MAGIC: u32 = 0x3152_4d43; // "CMR1"
+#[cfg(feature = "device")]
+const CANOPUS_DEVICE_PATH: &[u8] = b"/dev/canopus\0";
+
 #[unsafe(no_mangle)]
 pub extern "C" fn canopus_mod_prepare(_ctx: *const ContextV1) -> i32 {
     ACTIVE.store(false, Ordering::Release);
@@ -37,10 +55,10 @@ pub extern "C" fn canopus_mod_activate(_ctx: *const ContextV1) -> i32 {
     let rc = crate::target::activate();
     #[cfg(not(feature = "device"))]
     let rc = 0;
+    #[cfg(feature = "device")]
+    RESIDENT.store(crate::target::resident(), Ordering::Release);
     if rc == 0 {
         ACTIVE.store(true, Ordering::Release);
-        #[cfg(feature = "device")]
-        RESIDENT.store(crate::target::resident(), Ordering::Release);
         0
     } else {
         LAST_ERROR.store(rc as u32, Ordering::Release);
@@ -123,7 +141,7 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
     module_id: pack(b"bluetooth_audio"),
     module_version: pack(b"0.1.0"),
     build_id: pack(b"bluetooth-audio-0.1.0"),
-    target_id: pack(b"xiaomi-band-10-pro-3.101.030"),
+    target_id: pack(MODULE_TARGET_ID),
     prepare: Some(canopus_mod_prepare),
     activate: Some(canopus_mod_activate),
     deactivate: Some(canopus_mod_deactivate),
@@ -132,6 +150,35 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
     publish_native_app: Some(canopus_mod_publish_native_app),
     publish_native_app_stage: Some(canopus_mod_publish_native_app_stage),
 };
+
+#[cfg(feature = "device")]
+#[unsafe(no_mangle)]
+pub extern "C" fn canopus_register_module_descriptor() -> i32 {
+    if canopus_target_private::canopus_identity_guard() != 0 {
+        return -1;
+    }
+    let registration = ModuleRegistrationV1 {
+        magic: REGISTRATION_MAGIC,
+        descriptor: core::ptr::addr_of!(canopus_module_descriptor) as usize as u32,
+        module_id: pack(b"bluetooth_audio"),
+    };
+    let fd = unsafe { canopus_target_private::nuttx_open(CANOPUS_DEVICE_PATH.as_ptr(), 2) };
+    if fd < 0 {
+        return fd;
+    }
+    let written = unsafe {
+        canopus_target_private::nuttx_write(
+            fd,
+            core::ptr::addr_of!(registration).cast(),
+            core::mem::size_of::<ModuleRegistrationV1>() as u32,
+        )
+    };
+    let close = unsafe { canopus_target_private::nuttx_close(fd) };
+    if written != core::mem::size_of::<ModuleRegistrationV1>() as i32 {
+        return if written < 0 { written } else { -1 };
+    }
+    close
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn canopus_module_descriptor_ptr() -> *const ModuleDescriptorV1 {

@@ -3,11 +3,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod address;
+pub mod audio_input;
 pub mod avdtp;
 pub mod controller;
 pub mod discovery;
 pub mod media;
 pub mod model;
+pub mod mp3;
 mod sbc_tone_frames;
 pub mod ui;
 

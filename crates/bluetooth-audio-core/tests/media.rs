@@ -1,4 +1,6 @@
-use canopus_bluetooth_audio_core::media::{MAX_FRAME_LENGTH, MAX_PACKET, TonePacketizer};
+use canopus_bluetooth_audio_core::media::{
+    MAX_FRAME_LENGTH, MAX_PACKET, StreamPacketizer, TonePacketizer,
+};
 
 #[test]
 fn packetizes_tone_with_rtp_progression() {
@@ -48,6 +50,43 @@ fn every_supported_stereo_bitpool_has_a_matching_frame() {
         assert_eq!(n, 13 + 5 * frame_length);
         assert_eq!(&packet[13..16], &[0x9c, 0xb9, bitpool]);
     }
+}
+
+#[test]
+fn derives_bounded_startup_prebuffer_from_sink_delay() {
+    let mut p = TonePacketizer::new(672, 39).unwrap();
+    assert_eq!(p.startup_packets(1_500), 11);
+    assert_eq!(p.startup_packets(0), 11);
+    assert_eq!(p.startup_packets(u16::MAX), 16);
+    assert!(matches!(p.startup_catchup_delay_ms(11), 144 | 145));
+    let mut drain = TonePacketizer::new(672, 39).unwrap();
+    assert!(matches!(
+        drain.presentation_drain_delay_ms(1_500),
+        164 | 165
+    ));
+    assert!(drain.presentation_drain_delay_ms(u16::MAX) <= 515);
+}
+
+#[test]
+fn packetizes_variable_length_stream_packets() {
+    let mut p = StreamPacketizer::new(672, 39).unwrap();
+    let mut packet = [0u8; MAX_PACKET];
+    let payload = p.write_header(&mut packet, 5, true).unwrap();
+    assert_eq!(payload, 13);
+    assert_eq!(p.packet_length(5).unwrap(), 13 + 5 * 90);
+    assert_eq!(packet[1], 96 | 0x80);
+    assert_eq!(packet[12], 5);
+    assert_eq!(p.sequence, 2);
+    assert_eq!(p.timestamp, 640);
+    assert!(matches!(p.next_delay_ms(5), 14 | 15));
+
+    p.write_header(&mut packet, 2, false).unwrap();
+    assert_eq!(packet[1], 96);
+    assert_eq!(packet[12], 2);
+    assert_eq!(p.frames_sent, 7);
+    assert_eq!(p.timestamp, 896);
+    assert!(p.write_header(&mut packet, 0, false).is_err());
+    assert!(p.write_header(&mut packet, 6, false).is_err());
 }
 
 #[test]

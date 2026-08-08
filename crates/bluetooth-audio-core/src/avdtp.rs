@@ -75,6 +75,8 @@ pub struct Source {
     pub remote_seid: u8,
     pub selected_sbc: SbcConfig,
     pub delay_reporting: bool,
+    /// Most recent sink Delay Report in AVDTP 100-microsecond units.
+    pub reported_delay_100us: u16,
     pub local_in_use: bool,
     pub media_connected: bool,
     next_transaction: u8,
@@ -105,6 +107,7 @@ impl Source {
                 maximum_bitpool: 0,
             },
             delay_reporting: false,
+            reported_delay_100us: 0,
             local_in_use: false,
             media_connected: false,
             next_transaction: 0,
@@ -288,6 +291,7 @@ impl Source {
                 self.remote_seid = 0;
                 self.local_in_use = false;
                 self.delay_reporting = false;
+                self.reported_delay_100us = 0;
                 self.selected_sbc = SbcConfig::default();
             }
             _ => {}
@@ -539,6 +543,7 @@ impl Source {
                 self.remote_seid = 0;
                 self.pending_signal = 0;
                 self.delay_reporting = false;
+                self.reported_delay_100us = 0;
                 self.media_connected = false;
                 Ok(len)
             }
@@ -549,8 +554,8 @@ impl Source {
                 if !self.local_in_use || !self.delay_reporting {
                     return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out);
                 }
-                let len = response(transaction, signal, MSG_ACCEPT, &[], out)?;
-                Ok(len)
+                self.reported_delay_100us = u16::from_be_bytes([payload[1], payload[2]]);
+                response(transaction, signal, MSG_ACCEPT, &[], out)
             }
             SIGNAL_START if self.valid_local_seid(payload) => {
                 if self.state != State::Open || !self.media_connected {

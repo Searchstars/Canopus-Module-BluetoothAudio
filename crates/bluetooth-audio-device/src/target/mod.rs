@@ -1,4 +1,6 @@
-//! Exact-firmware private backend for `xiaomi-band-10-pro-3.101.030`.
+//! Target-selected private backend. The current build profile selects
+//! `xiaomi-band-10-pro-3.101.030`; future profiles select sibling private ABI
+//! implementations without changing this module logic.
 //!
 //! These APIs are not part of the public, audited `canopus-target-generated`
 //! bindings; every absolute address and ABI record lives in the target-private
@@ -36,10 +38,13 @@ use canopus_bluetooth_audio_core::{
 
 use runtime::*;
 
+pub mod audio_device;
+pub mod audio_stream;
 pub mod bluetooth;
 pub mod compatibility;
 pub mod native_app;
 pub mod runtime;
+pub mod sbc_encoder;
 pub mod transport;
 pub mod ui_backend;
 
@@ -72,13 +77,17 @@ pub fn activate() -> i32 {
         runtime().last_error.store(error, Ordering::Release);
         return error;
     }
-    // This must remain the final fallible step: once the writable HCI callback
-    // slot points into this module, its code must stay resident until reboot.
+    // Once the writable HCI callback points into this module, code must stay
+    // resident even if a later optional service publication fails.
     if let Err(error) = compatibility::install() {
         runtime().last_error.store(error, Ordering::Release);
         return error;
     }
     runtime().resident.store(true, Ordering::Release);
+    if let Err(error) = audio_device::register() {
+        runtime().last_error.store(error, Ordering::Release);
+        return error;
+    }
     0
 }
 
@@ -257,7 +266,8 @@ pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u
                 | (21, ui::EVENT_SCAN)
                 | (31, ui::EVENT_REFRESH)
                 | (34, ui::EVENT_TEST_TONE)
-                | (35, ui::EVENT_DISCONNECT)
+                | (35, ui::EVENT_LONG_MP3)
+                | (36, ui::EVENT_DISCONNECT)
                 | (1, ui::EVENT_BACK)
         )
     });
@@ -306,7 +316,25 @@ fn handle_action(page_index: usize, event_id: u32) {
         with_core(|core| {
             if core.controller.model.connection == ConnectionState::Ready
                 && core.controller.model.stream == StreamState::Open
-                && transport::play_tone(&mut core.source, &mut core.signaling_out).is_ok()
+                && transport::play_tone(core).is_ok()
+            {
+                core.controller.model.stream =
+                    if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
+                        StreamState::Streaming
+                    } else {
+                        StreamState::Starting
+                    };
+                core.controller.model.touch();
+            }
+        });
+        rebuild(page_index);
+        return;
+    }
+    if event_id == ui::EVENT_LONG_MP3 {
+        with_core(|core| {
+            if core.controller.model.connection == ConnectionState::Ready
+                && core.controller.model.stream == StreamState::Open
+                && audio_stream::start_long_test().is_ok()
             {
                 core.controller.model.stream = StreamState::Starting;
                 core.controller.model.touch();

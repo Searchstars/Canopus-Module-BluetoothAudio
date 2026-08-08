@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering
 
 use super::bluetooth::DevicePlatform;
 use canopus_bluetooth_audio_core::{Controller, avdtp, media};
+use canopus_target_private::bt_alloc;
 
 pub const MAGIC: u32 = 0x4241_5541; // "BAUA"
 
@@ -38,6 +39,10 @@ pub const MEDIA_SUSPENDING: u32 = 5;
 pub const MEDIA_COMPLETE: u32 = 6;
 pub const MEDIA_DISCONNECTING: u32 = 7;
 pub const MEDIA_FAILED: u32 = 8;
+
+pub const MEDIA_FLAG_START_WHEN_CONNECTED: u32 = 1 << 0;
+pub const MEDIA_FLAG_FINISH_ON_TIMER: u32 = 1 << 1;
+pub const MEDIA_FLAG_EXTERNAL_STREAM: u32 = 1 << 2;
 
 // Peer flags (module-internal encoding of the connect/bond transaction).
 pub const FLAG_ADAPTER_REGISTERED: u32 = 1 << 0;
@@ -72,6 +77,9 @@ pub const ERR_MEDIA_ALLOC: i32 = -1202;
 pub const ERR_MEDIA_PACKET: i32 = -1203;
 pub const ERR_MEDIA_REMOTE: i32 = -1204;
 pub const ERR_MEDIA_TIMER: i32 = -1205;
+pub const ERR_AUDIO_DECODE: i32 = -1206;
+pub const ERR_AUDIO_CODEC: i32 = -1207;
+pub const ERR_AUDIO_QUEUE: i32 = -1208;
 pub const ERRNO_EIO: i32 = -5;
 pub const ERRNO_EBUSY: i32 = -16;
 pub const ERRNO_EINVAL: i32 = -22;
@@ -144,6 +152,8 @@ pub struct Runtime {
     pub media_timer_handle: AtomicU32,
     pub media_timer_generation: AtomicU32,
     pub media_flags: AtomicU32,
+    pub audio_timer_handle: AtomicU32,
+    pub audio_timer_generation: AtomicU32,
     pub sdp_handle: AtomicU32,
     pub sdp_registered: AtomicU32,
     // Native app / lifecycle.
@@ -199,6 +209,8 @@ impl Runtime {
             media_timer_handle: AtomicU32::new(0),
             media_timer_generation: AtomicU32::new(0),
             media_flags: AtomicU32::new(0),
+            audio_timer_handle: AtomicU32::new(0),
+            audio_timer_generation: AtomicU32::new(0),
             sdp_handle: AtomicU32::new(0),
             sdp_registered: AtomicU32::new(0),
             app_state: AtomicU32::new(APP_NONE),
@@ -214,24 +226,30 @@ impl Runtime {
 
 static mut RUNTIME: core::mem::MaybeUninit<Runtime> = core::mem::MaybeUninit::uninit();
 static mut CALLBACKS: [u32; 16] = [0; 16];
-static mut CORE: core::mem::MaybeUninit<Core> = core::mem::MaybeUninit::uninit();
+static CORE_PTR: AtomicUsize = AtomicUsize::new(0);
 static CORE_LOCK: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 
 /// Resets every fixed block and initializes the core state machines. Called
 /// from the module constructor; the firmware invokes it at most once per load.
 pub fn prepare(generation: u32) {
-    // SAFETY: prepare runs in the module constructor before any callback or
-    // UI event can observe this storage. `addr_of_mut!` avoids the
-    // `static_mut_refs` deny lint while still publishing the initialized block.
+    let mut core_pointer = CORE_PTR.load(Ordering::Acquire) as *mut Core;
+    if core_pointer.is_null() {
+        core_pointer = unsafe { bt_alloc(core::mem::size_of::<Core>() as u32) } as *mut Core;
+        if core_pointer.is_null() {
+            READY.store(false, Ordering::Release);
+            return;
+        }
+        CORE_PTR.store(core_pointer as usize, Ordering::Release);
+    }
+    // SAFETY: prepare runs before callback publication. A repeated supervisor
+    // prepare reuses the constructor allocation and resets it in place.
     unsafe {
         core::ptr::addr_of_mut!(RUNTIME)
             .cast::<Runtime>()
             .write(Runtime::const_new(generation));
         core::ptr::addr_of_mut!(CALLBACKS).write([0; 16]);
-        core::ptr::addr_of_mut!(CORE)
-            .cast::<Core>()
-            .write(Core::new(generation));
+        core_pointer.write(Core::new(generation));
     }
     runtime().adapter_state.store(-1, Ordering::Release);
     runtime().bond_transport.store(1, Ordering::Release);
@@ -263,8 +281,10 @@ pub fn with_core<R>(f: impl FnOnce(&mut Core) -> R) -> R {
     {
         core::hint::spin_loop();
     }
-    // SAFETY: exclusive ownership of CORE is held by the lock.
-    let out = unsafe { f(&mut *core::ptr::addr_of_mut!(CORE).cast::<Core>()) };
+    let pointer = CORE_PTR.load(Ordering::Acquire) as *mut Core;
+    // SAFETY: prepare publishes a valid resident allocation before READY, and
+    // exclusive ownership of its contents is held by the lock.
+    let out = unsafe { f(&mut *pointer) };
     CORE_LOCK.store(false, Ordering::Release);
     out
 }
@@ -279,8 +299,10 @@ pub fn try_with_core<R>(f: impl FnOnce(&mut Core) -> R) -> Option<R> {
         runtime().callback_dropped.fetch_add(1, Ordering::Relaxed);
         return None;
     }
-    // SAFETY: exclusive ownership of CORE is held by the lock.
-    let out = unsafe { f(&mut *core::ptr::addr_of_mut!(CORE).cast::<Core>()) };
+    let pointer = CORE_PTR.load(Ordering::Acquire) as *mut Core;
+    // SAFETY: prepare publishes a valid resident allocation before READY, and
+    // exclusive ownership of its contents is held by the lock.
+    let out = unsafe { f(&mut *pointer) };
     CORE_LOCK.store(false, Ordering::Release);
     Some(out)
 }

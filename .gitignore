@@ -6,3 +6,4 @@ build/
 .DS_Store
 watchfaces/bluetooth-audio/module.bin
 watchfaces/bluetooth-audio/receipt.bin
+watchfaces/bluetooth-audio/long_test_audio_stream.bin
