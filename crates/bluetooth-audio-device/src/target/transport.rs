@@ -488,10 +488,11 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
                         }
                     }
                     Err(error) => {
-                        let failure = if matches!(error, avdtp::Error::Rejected(_)) {
-                            ERR_REMOTE
-                        } else {
-                            ERR_PACKET
+                        let failure = match error {
+                            avdtp::Error::Rejected(_) => ERR_REMOTE,
+                            avdtp::Error::Unsupported => ERR_CODEC_UNSUPPORTED,
+                            avdtp::Error::State => ERR_STATE,
+                            avdtp::Error::Packet | avdtp::Error::Overflow => ERR_PACKET,
                         };
                         core.source.state = SourceState::Failed;
                         sync_stream_state(core, SourceState::Failed);
@@ -825,18 +826,18 @@ fn media_begin_tone(core: &mut Core) -> i32 {
     if r.media_state.load(Ordering::Acquire) != MEDIA_STARTING {
         return ERR_MEDIA_STATE;
     }
-    // Validate the negotiated SBC configuration matches the tone frame.
+    // Validate that the negotiated SBC configuration has a matching resident
+    // frame. The source selects one fixed bitpool inside the peer's range.
     let sbc = &core.source.selected_sbc;
     if sbc.frequency_channel != 0x22
         || sbc.blocks_subbands_allocation != 0x15
-        || sbc.minimum_bitpool > 53
-        || sbc.maximum_bitpool < 53
+        || sbc.minimum_bitpool > sbc.maximum_bitpool
     {
         r.media_state.store(MEDIA_FAILED, Ordering::Release);
         return ERR_MEDIA_STATE;
     }
     let mtu = r.media_mtu.load(Ordering::Acquire) as u16;
-    let packetizer = match media::TonePacketizer::new(mtu) {
+    let packetizer = match media::TonePacketizer::new(mtu, sbc.maximum_bitpool) {
         Ok(packetizer) => packetizer,
         Err(_) => {
             r.media_state.store(MEDIA_FAILED, Ordering::Release);
@@ -885,7 +886,7 @@ fn sync_media_counters(core: &mut Core, r: &Runtime) {
             .store(packetizer.frames_per_packet as u32, Ordering::Release);
         core.controller.model.details.packets_sent = packetizer.packets_sent;
         core.controller.model.details.frames_sent = packetizer.frames_sent;
-        core.controller.model.details.bitpool = 53;
+        core.controller.model.details.bitpool = packetizer.bitpool;
         core.controller.model.details.sbc_frequency_channel = 0x22;
         core.controller.model.details.sbc_blocks_subbands_allocation = 0x15;
     }

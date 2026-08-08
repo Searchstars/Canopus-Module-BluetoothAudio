@@ -398,12 +398,15 @@ impl Source {
             {
                 let frequency_channel = value[2] & 0x22;
                 let shape = value[3] & 0x15;
-                if frequency_channel == 0x22 && shape == 0x15 && value[4] <= 53 && value[5] >= 53 {
+                let minimum_bitpool = value[4].max(crate::sbc_tone_frames::MIN_BITPOOL);
+                let maximum_bitpool = value[5].min(crate::sbc_tone_frames::MAX_BITPOOL);
+                if frequency_channel == 0x22 && shape == 0x15 && minimum_bitpool <= maximum_bitpool
+                {
                     found = Some(SbcConfig {
                         frequency_channel: 0x22,
                         blocks_subbands_allocation: 0x15,
-                        minimum_bitpool: 53,
-                        maximum_bitpool: 53,
+                        minimum_bitpool,
+                        maximum_bitpool,
                     });
                 }
             }
@@ -427,8 +430,8 @@ impl Source {
             0,
             0x22,
             0x15,
-            53,
-            53,
+            config.minimum_bitpool,
+            config.maximum_bitpool,
         ]);
         let len = if delay {
             bytes[12] = 8;
@@ -485,8 +488,8 @@ impl Source {
                     0,
                     0x22,
                     0x15,
-                    53,
-                    53,
+                    crate::sbc_tone_frames::MIN_BITPOOL,
+                    crate::sbc_tone_frames::MAX_BITPOOL,
                     CATEGORY_DELAY_REPORTING,
                     0,
                 ];

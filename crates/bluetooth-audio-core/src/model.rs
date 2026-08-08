@@ -62,6 +62,7 @@ pub const PAIR_DIAG_DISPLAY: u8 = 1 << 2;
 pub const PAIR_DIAG_BONDED: u8 = 1 << 3;
 pub const PAIR_DIAG_REMOVE_PENDING: u8 = 1 << 4;
 pub const PAIR_DIAG_REMOVE_CONFIRMED: u8 = 1 << 5;
+pub const PAIR_DIAG_MHDT_FIXED: u8 = 1 << 6;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LinkDetails {

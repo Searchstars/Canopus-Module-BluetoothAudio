@@ -24,6 +24,51 @@ fn negotiates_audio_sink_and_sbc_441_stereo() {
 }
 
 #[test]
+fn negotiates_real_peer_bitpool_39_and_emits_set_configuration() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    assert_eq!(source.connected(&mut out).unwrap(), 2);
+    assert_eq!(
+        source
+            .receive(
+                &[
+                    0x02, 0x01, 0x04, 0x08, 0x08, 0x08, 0x0c, 0x08, 0x10, 0x08, 0x14, 0x08
+                ],
+                &mut out,
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(&out[..3], &[0x10, 0x0c, 0x04]);
+
+    let packet = [
+        0x12, 0x0c, 0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x3f, 0xff, 0x02, 0x27, 0x08, 0x00,
+    ];
+    let n = source.receive(&packet, &mut out).unwrap();
+    assert_eq!(source.state, State::Configuring);
+    assert_eq!(source.remote_seid, 1);
+    assert_eq!(source.local_seid, 1);
+    assert_eq!(source.selected_sbc.frequency_channel, 0x22);
+    assert_eq!(source.selected_sbc.blocks_subbands_allocation, 0x15);
+    assert_eq!(source.selected_sbc.minimum_bitpool, 27);
+    assert_eq!(source.selected_sbc.maximum_bitpool, 39);
+    assert_eq!(n, 16);
+    assert_eq!(
+        &out[..n],
+        &[
+            0x20, 0x03, 0x04, 0x04, 0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x22, 0x15, 27, 39, 0x08,
+            0x00,
+        ]
+    );
+
+    let n = source.receive(&[0x22, 0x03], &mut out).unwrap();
+    assert_eq!(source.state, State::Opening);
+    assert_eq!(&out[..n], &[0x30, 0x06, 0x04]);
+    assert_eq!(source.receive(&[0x32, 0x06], &mut out).unwrap(), 0);
+    assert_eq!(source.state, State::Open);
+}
+
+#[test]
 fn reassembles_fragmented_capabilities() {
     let mut source = Source::new(1);
     let mut out = [0u8; 64];
