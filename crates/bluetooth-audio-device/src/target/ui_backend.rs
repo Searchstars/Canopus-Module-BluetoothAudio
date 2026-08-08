@@ -10,6 +10,7 @@ use canopus_ui_core::{NodeKind, Snapshot, TextStyle};
 use super::native_app::{APP_ID, PAGE_COUNT, PAGE_OVERVIEW, page_descriptor_ptr};
 
 static EMPTY_TEXT: [u8; 1] = [0];
+const REFRESH_PERIOD_MS: u32 = 250;
 
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -24,9 +25,11 @@ struct PageBackend {
     root: *mut core::ffi::c_void,
     content_root: *mut core::ffi::c_void,
     page_title: *mut core::ffi::c_void,
+    refresh_timer: *mut core::ffi::c_void,
     rows: [*mut core::ffi::c_void; UI_MAX_ROWS],
     labels: [*mut core::ffi::c_void; UI_MAX_LABELS],
     row_kinds: [u8; UI_MAX_ROWS],
+    row_keys: [u32; UI_MAX_ROWS],
     bindings: [Binding; UI_MAX_ROWS],
     row_count: u32,
     label_count: u32,
@@ -34,6 +37,7 @@ struct PageBackend {
     page_index: u8,
     active: bool,
     interactive: bool,
+    refresh_failed: bool,
 }
 
 const fn empty_backend() -> PageBackend {
@@ -41,9 +45,11 @@ const fn empty_backend() -> PageBackend {
         root: core::ptr::null_mut(),
         content_root: core::ptr::null_mut(),
         page_title: core::ptr::null_mut(),
+        refresh_timer: core::ptr::null_mut(),
         rows: [core::ptr::null_mut(); UI_MAX_ROWS],
         labels: [core::ptr::null_mut(); UI_MAX_LABELS],
         row_kinds: [0; UI_MAX_ROWS],
+        row_keys: [0; UI_MAX_ROWS],
         bindings: [Binding {
             generation: 0,
             key: 0,
@@ -55,6 +61,7 @@ const fn empty_backend() -> PageBackend {
         page_index: 0,
         active: false,
         interactive: false,
+        refresh_failed: false,
     }
 }
 
@@ -68,6 +75,27 @@ fn page_backend(index: usize) -> &'static mut PageBackend {
         &mut *core::ptr::addr_of_mut!(PAGES)
             .cast::<PageBackend>()
             .add(index)
+    }
+}
+
+extern "C" fn refresh_timer(timer: *mut core::ffi::c_void) {
+    if timer.is_null() {
+        return;
+    }
+    for page_index in 0..PAGE_COUNT {
+        let backend = page_backend(page_index);
+        if backend.refresh_timer != timer {
+            continue;
+        }
+        if backend.active && backend.interactive && !backend.refresh_failed {
+            let rendered_generation = backend.rendered_generation;
+            if super::rebuild_if_changed(page_index, rendered_generation) != 0 {
+                // A transient or capacity/LVX failure must not create a 4 Hz
+                // rebuild loop. Resume or an explicit Refresh retries it.
+                backend.refresh_failed = true;
+            }
+        }
+        return;
     }
 }
 
@@ -85,7 +113,24 @@ pub fn page_create(page_index: usize, root: *mut core::ffi::c_void) -> i32 {
     backend.page_index = page_index as u8;
     backend.active = true;
     backend.interactive = true;
-    super::rebuild(page_index)
+    let result = super::rebuild(page_index);
+    if result != 0 {
+        *page_backend(page_index) = empty_backend();
+        return result;
+    }
+    let timer = unsafe {
+        lvx_timer_create(
+            refresh_timer,
+            REFRESH_PERIOD_MS,
+            page_index as *mut core::ffi::c_void,
+        )
+    };
+    if timer.is_null() {
+        *page_backend(page_index) = empty_backend();
+        return -1;
+    }
+    page_backend(page_index).refresh_timer = timer;
+    0
 }
 
 pub fn page_resume(page_index: usize) -> i32 {
@@ -97,6 +142,7 @@ pub fn page_resume(page_index: usize) -> i32 {
         return -1;
     }
     backend.interactive = true;
+    backend.refresh_failed = false;
     super::rebuild(page_index)
 }
 
@@ -115,6 +161,10 @@ pub fn page_destroy(page_index: usize) -> i32 {
     let backend = page_backend(page_index);
     backend.active = false;
     backend.interactive = false;
+    if !backend.refresh_timer.is_null() {
+        unsafe { lvx_timer_delete(backend.refresh_timer) };
+        backend.refresh_timer = core::ptr::null_mut();
+    }
     // Drop every firmware widget pointer; the next create starts empty.
     *backend = empty_backend();
     0
@@ -209,7 +259,30 @@ fn target_row_kind(kind: NodeKind) -> u8 {
     }
 }
 
-fn find_row(backend: &PageBackend, kind: u8, used_mask: u32) -> Option<usize> {
+fn snapshot_uses_row(snapshot: &Snapshot, kind: u8, key: u32) -> bool {
+    for index in 0..snapshot.node_count as usize {
+        let node = &snapshot.nodes[index];
+        let is_row = node.kind().is_some_and(|node_kind| {
+            matches!(
+                node_kind,
+                NodeKind::StatusRow | NodeKind::Button | NodeKind::ActionRow | NodeKind::SwitchRow
+            ) && target_row_kind(node_kind) == kind
+        });
+        if node.key == key && is_row {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_row(
+    backend: &PageBackend,
+    snapshot: &Snapshot,
+    kind: u8,
+    key: u32,
+    used_mask: u32,
+) -> Option<usize> {
+    let mut reusable = None;
     let mut empty = None;
     for i in 0..UI_MAX_ROWS {
         if backend.rows[i].is_null() {
@@ -217,10 +290,15 @@ fn find_row(backend: &PageBackend, kind: u8, used_mask: u32) -> Option<usize> {
                 empty = Some(i);
             }
         } else if backend.row_kinds[i] == kind && (used_mask & (1 << i)) == 0 {
-            return Some(i);
+            if backend.row_keys[i] == key {
+                return Some(i);
+            }
+            if reusable.is_none() && !snapshot_uses_row(snapshot, kind, backend.row_keys[i]) {
+                reusable = Some(i);
+            }
         }
     }
-    empty
+    reusable.or(empty)
 }
 
 /// Applies a committed snapshot to the stock LVX page. Returns 0 on success.
@@ -368,7 +446,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             ROW_SWITCH => TRAILING_SWITCH,
             _ => TRAILING_NONE,
         };
-        let slot = match find_row(backend, row_kind, used_mask) {
+        let slot = match find_row(backend, snapshot, row_kind, node.key, used_mask) {
             Some(slot) => slot,
             None => return -1,
         };
@@ -428,6 +506,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             unsafe { lvx_align_to(object, previous, ALIGN_OUT_BOTTOM_MID, 0, ROW_GAP) };
         }
         previous = object;
+        backend.row_keys[slot] = node.key;
         backend.bindings[slot] = Binding {
             generation: snapshot.generation,
             key: node.key,
@@ -452,5 +531,6 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
         }
     }
     backend.rendered_generation = snapshot.generation;
+    backend.refresh_failed = false;
     0
 }

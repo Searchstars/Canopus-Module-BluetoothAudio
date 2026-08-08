@@ -28,11 +28,15 @@ use core::sync::atomic::Ordering;
 
 use canopus_target_private::*;
 
-use canopus_bluetooth_audio_core::{ConnectionState, StreamState, ui};
+use canopus_bluetooth_audio_core::{
+    ConnectionState, PAIR_DIAG_BONDED, PAIR_DIAG_DISPLAY, PAIR_DIAG_FILTER_HIT,
+    PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST, StreamState, ui,
+};
 
 use runtime::*;
 
 pub mod bluetooth;
+pub mod compatibility;
 pub mod native_app;
 pub mod runtime;
 pub mod transport;
@@ -64,6 +68,12 @@ pub fn activate() -> i32 {
         return error;
     }
     if let Err(error) = transport::schedule_initialize() {
+        runtime().last_error.store(error, Ordering::Release);
+        return error;
+    }
+    // This must remain the final fallible step: once the writable HCI callback
+    // slot points into this module, its code must stay resident until reboot.
+    if let Err(error) = compatibility::install() {
         runtime().last_error.store(error, Ordering::Release);
         return error;
     }
@@ -102,10 +112,76 @@ pub fn query_status() -> [u32; 20] {
     ]
 }
 
+/// Copies target-owned diagnostics into the semantic model. This runs under the
+/// core lock on the page owner thread; Bluetooth callbacks only publish atomics.
+fn sync_target_model(core: &mut Core) {
+    let r = runtime();
+    let mut changed = false;
+    let error = r.last_error.load(Ordering::Acquire);
+    if core.controller.model.last_error != error {
+        core.controller.model.last_error = error;
+        changed = true;
+    }
+    let transport_state = r.transport_state.load(Ordering::Acquire);
+    let media_state = r.media_state.load(Ordering::Acquire);
+    if transport_state == TRANSPORT_FAILED
+        && core.controller.model.connection != ConnectionState::Failed
+    {
+        core.controller.model.connection = ConnectionState::Failed;
+        changed = true;
+    }
+    if media_state == MEDIA_FAILED && core.controller.model.stream != StreamState::Failed {
+        core.controller.model.stream = StreamState::Failed;
+        changed = true;
+    }
+    let details = &mut core.controller.model.details;
+    let signaling_cid = r.signaling_cid.load(Ordering::Acquire) as u16;
+    let signaling_mtu = r.signaling_mtu.load(Ordering::Acquire) as u16;
+    let media_cid = r.media_cid.load(Ordering::Acquire) as u16;
+    let media_mtu = r.media_mtu.load(Ordering::Acquire) as u16;
+    let stock_bond_state = r.stock_bond_state.load(Ordering::Acquire) as u8;
+    let device_bond_state = r.device_bond_state.load(Ordering::Acquire) as u8;
+    let runtime_flags = r.flags.load(Ordering::Acquire);
+    let mut pairing_flags = 0u8;
+    for (runtime_flag, diagnostic_flag) in [
+        (FLAG_CORE_FILTER_HIT, PAIR_DIAG_FILTER_HIT),
+        (FLAG_PAIR_REQUEST_SEEN, PAIR_DIAG_REQUEST),
+        (FLAG_PAIR_DISPLAY_SEEN, PAIR_DIAG_DISPLAY),
+        (FLAG_BONDED, PAIR_DIAG_BONDED),
+        (FLAG_REMOVE_PENDING, PAIR_DIAG_REMOVE_PENDING),
+        (FLAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_CONFIRMED),
+    ] {
+        if runtime_flags & runtime_flag != 0 {
+            pairing_flags |= diagnostic_flag;
+        }
+    }
+    if details.signaling_cid != signaling_cid
+        || details.signaling_mtu != signaling_mtu
+        || details.media_cid != media_cid
+        || details.media_mtu != media_mtu
+        || details.stock_bond_state != stock_bond_state
+        || details.device_bond_state != device_bond_state
+        || details.pairing_flags != pairing_flags
+    {
+        details.signaling_cid = signaling_cid;
+        details.signaling_mtu = signaling_mtu;
+        details.media_cid = media_cid;
+        details.media_mtu = media_mtu;
+        details.stock_bond_state = stock_bond_state;
+        details.device_bond_state = device_bond_state;
+        details.pairing_flags = pairing_flags;
+        changed = true;
+    }
+    if changed {
+        core.controller.model.touch();
+    }
+}
+
 /// Builds the semantic snapshot for `page_index` from the current model and
 /// applies it to the stock LVX page. Runs on the page owner thread only.
 pub fn rebuild(page_index: usize) -> i32 {
     let snapshot = with_core(|core| {
+        sync_target_model(core);
         let model = &core.controller.model;
         let built = if page_index == PAGE_DETAIL {
             ui::detail(model)
@@ -123,17 +199,55 @@ pub fn rebuild(page_index: usize) -> i32 {
     }
 }
 
+/// Rebuilds an active page only when callbacks have committed a newer model.
+/// The LVGL timer invoking this function belongs to the page owner thread, so
+/// applying the snapshot never crosses UI-thread ownership.
+pub fn rebuild_if_changed(page_index: usize, rendered_generation: u32) -> i32 {
+    let snapshot = with_core(|core| {
+        sync_target_model(core);
+        let model = &core.controller.model;
+        if model.generation == rendered_generation {
+            return None;
+        }
+        let built = if page_index == PAGE_DETAIL {
+            ui::detail(model)
+        } else {
+            ui::overview(model)
+        };
+        Some(built.map(|mut snap| {
+            snap.generation = model.generation;
+            snap
+        }))
+    });
+    match snapshot {
+        None => 0,
+        Some(Ok(snap)) => ui_backend::apply_snapshot(page_index, &snap),
+        Some(Err(_)) => -1,
+    }
+}
+
 /// Dispatches a generation-checked LVX event to the model and re-renders.
 /// Only ever called from the page owner thread (LVX event callbacks).
 pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u32) {
     let valid = with_core(|core| {
         let model = &core.controller.model;
+        // Refresh must remain usable when asynchronous callbacks have advanced
+        // the model beyond the generation rendered into this row. Other actions
+        // keep strict generation checks so stale device-index bindings cannot
+        // target a different discovery result.
+        if (key, event_id) == (31, ui::EVENT_REFRESH) {
+            return true;
+        }
         if generation != model.generation {
             return false;
         }
         if event_id >= ui::EVENT_DEVICE_BASE {
             let index = (event_id - ui::EVENT_DEVICE_BASE) as usize;
-            return key == 1000u32 + index as u32 && index < model.devices.entries().len();
+            return model
+                .devices
+                .entries()
+                .get(index)
+                .is_some_and(|device| key == ui::device_key(device.address));
         }
         matches!(
             (key, event_id),

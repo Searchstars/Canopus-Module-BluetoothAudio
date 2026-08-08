@@ -1,16 +1,28 @@
 //! Allocation-free AVDTP Source signaling state machine.
 
 const MSG_COMMAND: u8 = 0;
+const MSG_GENERAL_REJECT: u8 = 1;
 const MSG_ACCEPT: u8 = 2;
 const MSG_REJECT: u8 = 3;
 const SIGNAL_DISCOVER: u8 = 0x01;
-const SIGNAL_GET_ALL_CAPABILITIES: u8 = 0x0c;
+const SIGNAL_GET_CAPABILITIES: u8 = 0x02;
 const SIGNAL_SET_CONFIGURATION: u8 = 0x03;
+const SIGNAL_GET_CONFIGURATION: u8 = 0x04;
+const SIGNAL_RECONFIGURE: u8 = 0x05;
 const SIGNAL_OPEN: u8 = 0x06;
 const SIGNAL_START: u8 = 0x07;
+const SIGNAL_CLOSE: u8 = 0x08;
 const SIGNAL_SUSPEND: u8 = 0x09;
+const SIGNAL_ABORT: u8 = 0x0a;
+const SIGNAL_SECURITY_CONTROL: u8 = 0x0b;
+const SIGNAL_GET_ALL_CAPABILITIES: u8 = 0x0c;
+const SIGNAL_DELAY_REPORT: u8 = 0x0d;
+const CATEGORY_MEDIA_TRANSPORT: u8 = 0x01;
 const CATEGORY_MEDIA_CODEC: u8 = 0x07;
 const CATEGORY_DELAY_REPORTING: u8 = 0x08;
+const ERROR_BAD_ACP_SEID: u8 = 0x12;
+const ERROR_BAD_PAYLOAD_FORMAT: u8 = 0x18;
+const ERROR_BAD_STATE: u8 = 0x31;
 const MAX_SDU: usize = 128;
 const FRAGMENT_CAPACITY: usize = MAX_SDU - 2;
 const PACKET_SINGLE: u8 = 0;
@@ -63,6 +75,8 @@ pub struct Source {
     pub remote_seid: u8,
     pub selected_sbc: SbcConfig,
     pub delay_reporting: bool,
+    pub local_in_use: bool,
+    pub media_connected: bool,
     next_transaction: u8,
     pending_transaction: u8,
     pending_signal: u8,
@@ -91,6 +105,8 @@ impl Source {
                 maximum_bitpool: 0,
             },
             delay_reporting: false,
+            local_in_use: false,
+            media_connected: false,
             next_transaction: 0,
             pending_transaction: 0,
             pending_signal: 0,
@@ -130,7 +146,11 @@ impl Source {
     }
 
     pub fn suspend(&mut self, out: &mut [u8]) -> Result<usize, Error> {
-        if self.state != State::Streaming || self.pending_signal != 0 {
+        if self.link != LinkState::Connected
+            || self.state != State::Streaming
+            || self.remote_seid == 0
+            || self.pending_signal != 0
+        {
             return Err(Error::State);
         }
         let payload = [self.remote_seid << 2];
@@ -239,14 +259,40 @@ impl Source {
     ) -> Result<usize, Error> {
         match message {
             MSG_ACCEPT => self.accept(transaction, signal, payload, out),
-            MSG_REJECT => {
-                self.pending_signal = 0;
-                self.state = State::Failed;
-                Err(Error::Rejected(payload.first().copied().unwrap_or(0)))
-            }
+            MSG_REJECT | MSG_GENERAL_REJECT => self.reject(transaction, signal, payload, out),
             MSG_COMMAND => self.remote_command(transaction, signal, payload, out),
             _ => Err(Error::Packet),
         }
+    }
+
+    fn reject(
+        &mut self,
+        transaction: u8,
+        signal: u8,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        if signal != self.pending_signal || transaction != self.pending_transaction {
+            return Err(Error::Packet);
+        }
+        self.pending_signal = 0;
+        if signal == SIGNAL_GET_ALL_CAPABILITIES {
+            return self.command(SIGNAL_GET_CAPABILITIES, &[self.remote_seid << 2], out);
+        }
+        match signal {
+            SIGNAL_OPEN => self.state = State::Configuring,
+            SIGNAL_START => self.state = State::Open,
+            SIGNAL_SUSPEND => self.state = State::Streaming,
+            SIGNAL_DISCOVER | SIGNAL_GET_CAPABILITIES | SIGNAL_SET_CONFIGURATION => {
+                self.state = State::Idle;
+                self.remote_seid = 0;
+                self.local_in_use = false;
+                self.delay_reporting = false;
+                self.selected_sbc = SbcConfig::default();
+            }
+            _ => {}
+        }
+        Err(Error::Rejected(payload.first().copied().unwrap_or(0)))
     }
 
     fn reset_fragment(&mut self) {
@@ -272,6 +318,9 @@ impl Source {
         self.pending_signal = 0;
         match signal {
             SIGNAL_DISCOVER => {
+                if payload.is_empty() || payload.len() & 1 != 0 {
+                    return Err(Error::Packet);
+                }
                 let seid = payload
                     .chunks_exact(2)
                     .find_map(|item| {
@@ -281,6 +330,8 @@ impl Source {
                         let sink = (item[1] >> 3) & 1;
                         (candidate > 0
                             && candidate <= 0x3e
+                            && item[0] & 1 == 0
+                            && item[1] & 7 == 0
                             && in_use == 0
                             && media_type == 0
                             && sink == 1)
@@ -291,11 +342,12 @@ impl Source {
                 self.state = State::ReadingCapabilities;
                 self.command(SIGNAL_GET_ALL_CAPABILITIES, &[seid << 2], out)
             }
-            SIGNAL_GET_ALL_CAPABILITIES => self.choose_sbc(payload, out),
+            SIGNAL_GET_ALL_CAPABILITIES | SIGNAL_GET_CAPABILITIES => self.choose_sbc(payload, out),
             SIGNAL_SET_CONFIGURATION => {
                 if !payload.is_empty() {
                     return Err(Error::Packet);
                 }
+                self.local_in_use = true;
                 self.state = State::Opening;
                 self.command(SIGNAL_OPEN, &[self.remote_seid << 2], out)
             }
@@ -389,6 +441,10 @@ impl Source {
         self.command(SIGNAL_SET_CONFIGURATION, &bytes[..len], out)
     }
 
+    fn valid_local_seid(&self, payload: &[u8]) -> bool {
+        payload.len() == 1 && payload[0] & 3 == 0 && payload[0] >> 2 == self.local_seid
+    }
+
     fn remote_command(
         &mut self,
         transaction: u8,
@@ -396,18 +452,129 @@ impl Source {
         payload: &[u8],
         out: &mut [u8],
     ) -> Result<usize, Error> {
+        let local = self.local_seid << 2;
         match signal {
-            SIGNAL_START if payload == [self.local_seid << 2] && self.state == State::Open => {
+            SIGNAL_DISCOVER => {
+                if !payload.is_empty() {
+                    return response(
+                        transaction,
+                        signal,
+                        MSG_REJECT,
+                        &[ERROR_BAD_PAYLOAD_FORMAT],
+                        out,
+                    );
+                }
+                response(
+                    transaction,
+                    signal,
+                    MSG_ACCEPT,
+                    &[local | if self.local_in_use { 2 } else { 0 }, 0],
+                    out,
+                )
+            }
+            SIGNAL_GET_CAPABILITIES | SIGNAL_GET_ALL_CAPABILITIES => {
+                if !self.valid_local_seid(payload) {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_ACP_SEID], out);
+                }
+                let capabilities = [
+                    CATEGORY_MEDIA_TRANSPORT,
+                    0,
+                    CATEGORY_MEDIA_CODEC,
+                    6,
+                    0,
+                    0,
+                    0x22,
+                    0x15,
+                    53,
+                    53,
+                    CATEGORY_DELAY_REPORTING,
+                    0,
+                ];
+                let len = if signal == SIGNAL_GET_ALL_CAPABILITIES {
+                    capabilities.len()
+                } else {
+                    capabilities.len() - 2
+                };
+                response(transaction, signal, MSG_ACCEPT, &capabilities[..len], out)
+            }
+            SIGNAL_GET_CONFIGURATION => {
+                if !self.valid_local_seid(payload) {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_ACP_SEID], out);
+                }
+                if !self.local_in_use {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out);
+                }
+                let mut configuration = [
+                    CATEGORY_MEDIA_TRANSPORT,
+                    0,
+                    CATEGORY_MEDIA_CODEC,
+                    6,
+                    0,
+                    0,
+                    self.selected_sbc.frequency_channel,
+                    self.selected_sbc.blocks_subbands_allocation,
+                    self.selected_sbc.minimum_bitpool,
+                    self.selected_sbc.maximum_bitpool,
+                    0,
+                    0,
+                ];
+                let len = if self.delay_reporting {
+                    configuration[10] = CATEGORY_DELAY_REPORTING;
+                    12
+                } else {
+                    10
+                };
+                response(transaction, signal, MSG_ACCEPT, &configuration[..len], out)
+            }
+            SIGNAL_CLOSE | SIGNAL_ABORT => {
+                if !self.valid_local_seid(payload) {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_ACP_SEID], out);
+                }
+                let len = response(transaction, signal, MSG_ACCEPT, &[], out)?;
+                self.state = State::Idle;
+                self.local_in_use = false;
+                self.remote_seid = 0;
+                self.pending_signal = 0;
+                self.delay_reporting = false;
+                self.media_connected = false;
+                Ok(len)
+            }
+            SIGNAL_DELAY_REPORT => {
+                if payload.len() != 3 || payload[0] != local {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_ACP_SEID], out);
+                }
+                if !self.local_in_use || !self.delay_reporting {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out);
+                }
+                let len = response(transaction, signal, MSG_ACCEPT, &[], out)?;
+                Ok(len)
+            }
+            SIGNAL_START if self.valid_local_seid(payload) => {
+                if self.state != State::Open || !self.media_connected {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out);
+                }
+                let len = response(transaction, signal, MSG_ACCEPT, &[], out)?;
                 self.state = State::Streaming;
-                response(transaction, signal, MSG_ACCEPT, &[], out)
+                Ok(len)
             }
-            SIGNAL_SUSPEND
-                if payload == [self.local_seid << 2] && self.state == State::Streaming =>
-            {
+            SIGNAL_SUSPEND if self.valid_local_seid(payload) => {
+                if self.state != State::Streaming {
+                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out);
+                }
+                let len = response(transaction, signal, MSG_ACCEPT, &[], out)?;
                 self.state = State::Open;
-                response(transaction, signal, MSG_ACCEPT, &[], out)
+                Ok(len)
             }
-            _ => response(transaction, signal, MSG_REJECT, &[0x31], out),
+            SIGNAL_START | SIGNAL_SUSPEND => {
+                response(transaction, signal, MSG_REJECT, &[ERROR_BAD_ACP_SEID], out)
+            }
+            SIGNAL_RECONFIGURE => {
+                response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out)
+            }
+            SIGNAL_SECURITY_CONTROL | SIGNAL_SET_CONFIGURATION | SIGNAL_OPEN => {
+                response(transaction, signal, MSG_GENERAL_REJECT, &[], out)
+            }
+            _ => response(transaction, signal, MSG_GENERAL_REJECT, &[], out),
         }
     }
 

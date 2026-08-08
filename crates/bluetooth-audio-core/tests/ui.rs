@@ -1,6 +1,7 @@
 use canopus_bluetooth_audio_core::ui;
 use canopus_bluetooth_audio_core::{
-    Address, ConnectionState, DeviceName, DiscoveredDevice, Model, StreamState,
+    Address, ConnectionState, DeviceName, DiscoveredDevice, Model, PAIR_DIAG_DISPLAY,
+    PAIR_DIAG_FILTER_HIT, PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REQUEST, StreamState,
 };
 
 #[test]
@@ -28,6 +29,32 @@ fn overview_renders_all_retained_results_within_capacity() {
     assert!(snapshot.node_count as usize <= canopus_ui_core::MAX_NODES);
     assert!(snapshot.string_used as usize <= canopus_ui_core::STRING_CAPACITY);
 }
+#[test]
+fn device_rows_use_stable_address_keys() {
+    let first = Address::new([1, 2, 3, 4, 5, 6]);
+    let second = Address::new([1, 2, 3, 4, 5, 7]);
+    assert_eq!(ui::device_key(first), ui::device_key(first));
+    assert_ne!(ui::device_key(first), ui::device_key(second));
+}
+
+#[test]
+fn overview_exposes_pairing_milestones_without_extra_rows() {
+    let mut model = Model {
+        selected: Some(Default::default()),
+        ..Default::default()
+    };
+    model.details.stock_bond_state = 3;
+    model.details.device_bond_state = 2;
+    model.details.pairing_flags =
+        PAIR_DIAG_REMOVE_CONFIRMED | PAIR_DIAG_FILTER_HIT | PAIR_DIAG_REQUEST | PAIR_DIAG_DISPLAY;
+    let snapshot = ui::overview(&model).unwrap();
+    let diagnostic = snapshot.find_by_key(13).unwrap();
+    assert_eq!(
+        snapshot.primary(diagnostic),
+        "Bond 3/2 removed filter-hit request confirm"
+    );
+}
+
 #[test]
 fn detail_enables_tone_only_when_stream_ready() {
     let mut model = Model {

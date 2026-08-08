@@ -6,7 +6,7 @@ use canopus_bluetooth_audio_core::{
 struct Fake {
     calls: [u8; 8],
     len: usize,
-    bonded: bool,
+    removal_pending: bool,
 }
 impl Fake {
     fn push(&mut self, value: u8) {
@@ -24,9 +24,9 @@ impl Platform for Fake {
         self.push(2);
         Ok(())
     }
-    fn is_bonded(&mut self, _: Address) -> Result<bool, Self::Error> {
+    fn prepare_bond(&mut self, _: Address) -> Result<bool, Self::Error> {
         self.push(3);
-        Ok(self.bonded)
+        Ok(self.removal_pending)
     }
     fn create_bond(&mut self, _: Address) -> Result<(), Self::Error> {
         self.push(4);
@@ -69,16 +69,21 @@ fn selection_stops_scan_before_pairing() {
 }
 
 #[test]
-fn bonded_peer_connects_without_create_bond() {
+fn retained_bond_waits_for_removal_before_fresh_pair() {
     let mut c = Controller::new(Fake {
-        bonded: true,
+        removal_pending: true,
         ..Default::default()
     });
     c.model.devices.begin_scan();
     c.discovery_result(result());
     c.select(0).unwrap();
-    assert_eq!(c.model.connection, ConnectionState::Connecting);
-    assert_eq!(&c.platform().calls[..2], &[3, 5]);
+    assert_eq!(c.model.connection, ConnectionState::RemovingBond);
+    assert_eq!(&c.platform().calls[..1], &[3]);
+    c.bond_removed(result().address, true).unwrap();
+    assert_eq!(c.model.connection, ConnectionState::Pairing);
+    assert_eq!(&c.platform().calls[..2], &[3, 4]);
+    c.bond_complete(result().address, true).unwrap();
+    assert_eq!(&c.platform().calls[..3], &[3, 4, 5]);
 }
 
 #[test]

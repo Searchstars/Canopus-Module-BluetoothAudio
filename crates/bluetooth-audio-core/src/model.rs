@@ -15,6 +15,7 @@ pub enum ConnectionState {
     Disconnected,
     WaitingForScanStop,
     CheckingBond,
+    RemovingBond,
     Pairing,
     Connecting,
     Configuring,
@@ -55,12 +56,22 @@ pub struct Peer {
     pub bond: BondState,
 }
 
+pub const PAIR_DIAG_FILTER_HIT: u8 = 1 << 0;
+pub const PAIR_DIAG_REQUEST: u8 = 1 << 1;
+pub const PAIR_DIAG_DISPLAY: u8 = 1 << 2;
+pub const PAIR_DIAG_BONDED: u8 = 1 << 3;
+pub const PAIR_DIAG_REMOVE_PENDING: u8 = 1 << 4;
+pub const PAIR_DIAG_REMOVE_CONFIRMED: u8 = 1 << 5;
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LinkDetails {
     pub signaling_cid: u16,
     pub signaling_mtu: u16,
     pub media_cid: u16,
     pub media_mtu: u16,
+    pub stock_bond_state: u8,
+    pub device_bond_state: u8,
+    pub pairing_flags: u8,
     pub sbc_frequency_channel: u8,
     pub sbc_blocks_subbands_allocation: u8,
     pub bitpool: u8,

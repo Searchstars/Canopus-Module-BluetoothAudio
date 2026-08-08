@@ -1,4 +1,7 @@
-use crate::{ConnectionState, Model, ScanState};
+use crate::{
+    ConnectionState, Model, PAIR_DIAG_BONDED, PAIR_DIAG_DISPLAY, PAIR_DIAG_FILTER_HIT,
+    PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST, ScanState,
+};
 use canopus_ui_core::{Snapshot, TextStyle, Tree, UiError};
 use core::fmt::{self, Write};
 
@@ -9,6 +12,17 @@ pub const EVENT_BACK: u32 = 4;
 pub const EVENT_DISCONNECT: u32 = 5;
 pub const EVENT_TEST_TONE: u32 = 6;
 pub const EVENT_DEVICE_BASE: u32 = 100;
+
+/// Stable semantic identity for a discovered-device row. Event ids still carry
+/// the current bounded table index, while the key keeps the same LVX row object
+/// attached to a peer when RSSI updates reorder the table.
+pub fn device_key(address: crate::Address) -> u32 {
+    let mut hash = 0x811C_9DC5u32;
+    for byte in address.0 {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    hash | 0x8000_0000
+}
 
 pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
     let mut tree = Tree::begin();
@@ -28,6 +42,10 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
         let error = number(model.last_error);
         tree.text(12, error.as_str(), TextStyle::Warning)?;
     }
+    if model.selected.is_some() {
+        let diagnostic = pairing_diagnostic(model);
+        tree.text(13, diagnostic.as_str(), TextStyle::Description)?;
+    }
     tree.end()?;
     tree.section(20, "Nearby headsets")?;
     tree.button(
@@ -42,7 +60,7 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
     )?;
     tree.status_row(22, "Scan", scan_detail(model.scan))?;
     for (index, device) in model.devices.entries().iter().enumerate() {
-        let key = 1000 + index as u32;
+        let key = device_key(device.address);
         let event = EVENT_DEVICE_BASE + index as u32;
         let address = device.address.text();
         tree.action_row(
@@ -111,6 +129,29 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.commit()
 }
 
+fn pairing_diagnostic(model: &Model) -> FixedText<96> {
+    let details = &model.details;
+    let mut text = FixedText::<96>::default();
+    let _ = write!(
+        text,
+        "Bond {}/{}",
+        details.stock_bond_state, details.device_bond_state
+    );
+    for (flag, label) in [
+        (PAIR_DIAG_REMOVE_PENDING, " remove-wait"),
+        (PAIR_DIAG_REMOVE_CONFIRMED, " removed"),
+        (PAIR_DIAG_FILTER_HIT, " filter-hit"),
+        (PAIR_DIAG_REQUEST, " request"),
+        (PAIR_DIAG_DISPLAY, " confirm"),
+        (PAIR_DIAG_BONDED, " bonded"),
+    ] {
+        if details.pairing_flags & flag != 0 {
+            let _ = text.write_str(label);
+        }
+    }
+    text
+}
+
 fn display_name(name: &crate::DeviceName) -> &str {
     if name.is_empty() {
         "Unknown headset"
@@ -132,6 +173,7 @@ fn connection_detail(state: ConnectionState) -> &'static str {
         ConnectionState::Disconnected => "Not connected",
         ConnectionState::WaitingForScanStop => "Preparing…",
         ConnectionState::CheckingBond => "Checking pairing…",
+        ConnectionState::RemovingBond => "Clearing old pairing…",
         ConnectionState::Pairing => "Pairing…",
         ConnectionState::Connecting => "Connecting…",
         ConnectionState::Configuring => "Setting up audio…",

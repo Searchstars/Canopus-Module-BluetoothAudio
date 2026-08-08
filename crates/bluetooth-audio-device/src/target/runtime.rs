@@ -51,6 +51,12 @@ pub const FLAG_BONDED: u32 = 1 << 8;
 pub const FLAG_CONNECT_BOND_TRIED: u32 = 1 << 9;
 pub const FLAG_CORE_FILTER_INSTALLED: u32 = 1 << 10;
 pub const FLAG_CORE_FILTER_HIT: u32 = 1 << 11;
+pub const FLAG_REMOVE_PENDING: u32 = 1 << 12;
+pub const FLAG_REMOVE_CONFIRMED: u32 = 1 << 13;
+pub const FLAG_PAIR_REQUEST_SEEN: u32 = 1 << 15;
+pub const FLAG_PAIR_DISPLAY_SEEN: u32 = 1 << 16;
+pub const FLAG_HCI_SEND_FILTER_INSTALLED: u32 = 1 << 17;
+pub const FLAG_HCI_SEND_FILTER_HIT: u32 = 1 << 18;
 
 // App install result state.
 pub const ERR_STATE: i32 = -1101;
@@ -58,11 +64,14 @@ pub const ERR_ALLOC: i32 = -1102;
 pub const ERR_PACKET: i32 = -1104;
 pub const ERR_REMOTE: i32 = -1105;
 pub const ERR_SDP: i32 = -1106;
+pub const ERR_BOND_TIMEOUT: i32 = -1108;
+pub const ERR_HCI_POLICY: i32 = -1109;
 pub const ERR_MEDIA_STATE: i32 = -1201;
 pub const ERR_MEDIA_ALLOC: i32 = -1202;
 pub const ERR_MEDIA_PACKET: i32 = -1203;
 pub const ERR_MEDIA_REMOTE: i32 = -1204;
 pub const ERR_MEDIA_TIMER: i32 = -1205;
+pub const ERRNO_EIO: i32 = -5;
 pub const ERRNO_EBUSY: i32 = -16;
 pub const ERRNO_EINVAL: i32 = -22;
 pub const ERRNO_ENOSYS: i32 = -38;
@@ -104,6 +113,10 @@ pub struct Runtime {
     pub bond_transport: AtomicI32,
     pub bond_state: AtomicI32,
     pub stock_bond_state: AtomicU32,
+    pub device_bond_state: AtomicU32,
+    pub bond_generation: AtomicU32,
+    pub bond_timer_handle: AtomicU32,
+    pub bond_timer_phase: AtomicU32,
     pub target_low: AtomicU32,
     pub target_high: AtomicU32,
     pub target_sequence: AtomicU32,
@@ -128,6 +141,7 @@ pub struct Runtime {
     pub media_rtp_sequence: AtomicU32,
     pub media_rtp_timestamp: AtomicU32,
     pub media_timer_handle: AtomicU32,
+    pub media_timer_generation: AtomicU32,
     pub media_flags: AtomicU32,
     pub sdp_handle: AtomicU32,
     pub sdp_registered: AtomicU32,
@@ -155,6 +169,10 @@ impl Runtime {
             bond_transport: AtomicI32::new(1),
             bond_state: AtomicI32::new(0),
             stock_bond_state: AtomicU32::new(0),
+            device_bond_state: AtomicU32::new(0),
+            bond_generation: AtomicU32::new(0),
+            bond_timer_handle: AtomicU32::new(0),
+            bond_timer_phase: AtomicU32::new(0),
             target_low: AtomicU32::new(0),
             target_high: AtomicU32::new(0),
             target_sequence: AtomicU32::new(0),
@@ -178,6 +196,7 @@ impl Runtime {
             media_rtp_sequence: AtomicU32::new(0),
             media_rtp_timestamp: AtomicU32::new(0),
             media_timer_handle: AtomicU32::new(0),
+            media_timer_generation: AtomicU32::new(0),
             media_flags: AtomicU32::new(0),
             sdp_handle: AtomicU32::new(0),
             sdp_registered: AtomicU32::new(0),
