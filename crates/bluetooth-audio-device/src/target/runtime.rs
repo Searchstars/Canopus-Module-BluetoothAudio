@@ -55,8 +55,8 @@ pub const FLAG_REMOVE_PENDING: u32 = 1 << 12;
 pub const FLAG_REMOVE_CONFIRMED: u32 = 1 << 13;
 pub const FLAG_PAIR_REQUEST_SEEN: u32 = 1 << 15;
 pub const FLAG_PAIR_DISPLAY_SEEN: u32 = 1 << 16;
-pub const FLAG_HCI_SEND_FILTER_INSTALLED: u32 = 1 << 17;
-pub const FLAG_HCI_SEND_FILTER_HIT: u32 = 1 << 18;
+pub const FLAG_HCI_COMPAT_INSTALLED: u32 = 1 << 17;
+pub const FLAG_HCI_COMPAT_HIT: u32 = 1 << 18;
 
 // App install result state.
 pub const ERR_STATE: i32 = -1101;
@@ -64,6 +64,7 @@ pub const ERR_ALLOC: i32 = -1102;
 pub const ERR_PACKET: i32 = -1104;
 pub const ERR_REMOTE: i32 = -1105;
 pub const ERR_SDP: i32 = -1106;
+pub const ERR_CODEC_UNSUPPORTED: i32 = -1107;
 pub const ERR_BOND_TIMEOUT: i32 = -1108;
 pub const ERR_HCI_POLICY: i32 = -1109;
 pub const ERR_MEDIA_STATE: i32 = -1201;

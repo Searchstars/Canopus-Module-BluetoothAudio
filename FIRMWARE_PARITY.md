@@ -66,22 +66,30 @@ encryption, and the final BONDED callback.
   now request MTU 1024, producing standard option bytes `01 02 00 04`; writing a
   value at offset 52 while leaving the option bitmap zero produces an empty
   Configuration Request.
-- The live GAP transport vtable is rebuilt in writable DATA at
-  `0x20138070..0x20138084` when Bluetooth powers on. Its send entry at
-  `0x2013807C` is stock Thumb callback `0x0C7F9D11`; the HCI host stack invokes
-  that entry with every complete outbound H4 packet, before the callback
-  forwards through the lower transport function stored at `0x20137EF0`. The
-  boot-resident compatibility wrapper compare-checks the vtable slot, filters
-  only complete ACL/L2CAP signaling Information Responses. Extended Features
-  `(type=2, result=0, mask=0x000001B8)` is changed to `0x000000B8`, and the
-  exact Fixed Channels response `(type=3, result=0, mask=0x02)` is changed to
-  Android's `0x82`; all other bits and packets are forwarded unchanged. The
-  module reasserts the hook at adapter ON and immediately before
-  discovery/bond/connect operations because the power-on path reconstructs the
-  table. The previously
-  tested `/dev/ttyBT0` callback at `0x200ED89C + 8` is not on this stock ACL
-  transmit path and is intentionally not modified. The filter does not modify
-  the incoming `0x7F` Configuration option.
+- Three device A/B experiments changed the module's local receive MTU from an
+  empty request to 1024, Extended Features from `0x000001B8` to `0x000000B8`,
+  and Fixed Channels from `0x02` to Android's `0x82`. All three wire changes
+  took effect and none stopped the peer from sending `7F 01 01`. The final
+  candidate retains the MTU fix required by the stock connect ABI but leaves
+  both outbound Information Responses stock, avoiding unnecessary global
+  capability changes.
+- The GAP receive callback slot at `0x20137EA4` normally contains stock Thumb
+  dispatcher `0x0C7D3E0D`. The boot-resident wrapper compare-checks that
+  writable slot and filters only the exact BES mHDT peer-capability option
+  `7F 01 01` from a Configuration Request whose destination CID is one of this
+  module's live AVDTP channels. It repairs the HCI ACL, L2CAP,
+  signaling-command, and forwarded packet lengths, then lets the unmodified
+  stock parser process the remaining MTU option and complete its normal channel
+  state transition. It neither advertises local mHDT support nor enables mHDT
+  controller mode. The observed failing packet is a complete PB=2 ACL start
+  packet with a 19-byte ACL payload; continuation fragments are forwarded
+  untouched and are not misparsed as L2CAP headers. The module reasserts the
+  receive hook at adapter ON and before discovery/bond/connect because the
+  power-on path reconstructs the dispatcher. A successful rewrite sets the
+  retained UI diagnostic `mhdt-fixed`, so device validation does not depend on
+  where btsnoop is tapped. The previously tested
+  `/dev/ttyBT0` callback at `0x200ED89C + 8` and GAP send slot `0x2013807C` are
+  intentionally left stock.
 - L2CAP callback events: 2 confirm, 3 complete, 4/5 informational, 6 disconnect,
   7 data, 8 flow telemetry.
 - L2CAP completion fields: MTU at offset 72 and CID at offset 108.
@@ -92,12 +100,62 @@ encryption, and the final BONDED callback.
   accidentally interpreted by the stock callback dispatcher as ownership or
   control flow.
 
+## Stock profile-registration diff
+
+The stock product `profile_init` at `0x0C53FDB4` is not an in-process Audio
+Source registration path. It registers the product **headset/A2DP Sink** client
+through `0x0C398ABC`, then registers HFP AG. `0x0C398ABC` allocates a Bluetooth
+socket callback handle and sends operation 12 through `0x0C395C78`; the latter
+serializes a fixed 708-byte IPC envelope. Its callback at `0x0C542421` is named
+`headset_connection_state_callback`, and after A2DP reaches CONNECTED it starts
+`headset_ag_connect`. Reusing that descriptor would register the module as the
+product Sink/headset client, not create an Audio Source endpoint.
+
+The lower snoop classifier at `0x0C3AC5FC` recognizes AVDTP signaling solely
+from an L2CAP Connection Request whose PSM is 25 (`0x0019`) and records its CID
+pair. It does not consult the product callback descriptor, a service ID,
+authorization mask, or an AVDT control block. The device-proven custom Source
+implementation likewise registers its local Source SDP record and opens raw
+PSM `0x0019` channels; no separate Source/security registration call exists in
+that path.
+
+The remaining concrete Android/Vela distinction is controller context, not an
+invisible PSM flag. Android's successful capture reports local controller
+manufacturer `0x001D` (Qualcomm), while the REDMI peer reports manufacturer
+`0x02B0`; this firmware runs on the BES platform. BES mHDT state explicitly
+tracks controller features learned through vendor HCI separately from host
+support learned through L2CAP Configuration. Its 8DH5 maximum payload is 2820,
+exactly matching the peer's MTU `0x0B04` beside `7F 01 01`. This is why the
+final compatibility candidate handles the parser/controller mismatch rather
+than registering the product Sink IPC client.
+
+Android also completes a targeted remote Audio Sink `0x110B`
+ServiceSearchAttribute request for attributes `0x0001`, `0x0004`, and `0x0009`
+before opening PSM `0x0019`. The recovered SDK exposes only local SDP server
+registration, not a remote SDP client ABI. Reproducing that sequence would
+require an additional raw PSM `0x0001` client, continuation parser, timeout, and
+channel lifecycle. It remains a separate device A/B only if the exact mHDT
+compatibility path fails; it is not mixed into the current candidate because it
+does not explain the paired `2820 + 7F` selection.
+
 ## AVDTP and media constants
 
+- The first REDMI run after mHDT filtering passed L2CAP Configuration, sent
+  DISCOVER and GET ALL CAPABILITIES, then stopped on the accepted SBC capability
+  `3F FF 02 27`. The old selector required `remote_min <= 53 <= remote_max`;
+  `remote_max=0x27` made `choose_sbc` return `Unsupported`, which the transport
+  surfaced as `-1104`, before SET CONFIGURATION could be emitted. Local SEID 1
+  and remote Sink SEID 1 were both valid. The selector now intersects the peer
+  range with resident bitpools 27..53, emits the negotiated range 27..39 in
+  SET CONFIGURATION, and transmits the tone at bitpool 39 for this response.
 - Local SEID: 1.
-- SBC: 44.1 kHz, stereo, 16 blocks, 8 subbands, Loudness, bitpool 53.
-- SBC capability/config bytes: `0x22`, `0x15`, `0x35`, `0x35`.
-- Frame length: 118 bytes; samples per frame: 128.
+- SBC: 44.1 kHz, stereo, 16 blocks, 8 subbands, Loudness. The source selects
+  the highest peer-supported bitpool in its resident 27..53 encoder-frame range;
+  REDMI's `02..27` capability therefore selects bitpool 39 instead of failing
+  the previous hard requirement for 53.
+- SBC capability bytes advertised locally: `0x22`, `0x15`, `27`, `53`.
+- Frame length is `12 + 2 * bitpool`: 90 bytes at bitpool 39 and 118 bytes at
+  bitpool 53; samples per frame remain 128.
 - Five frames per RTP packet where MTU permits.
 - RTP payload type: 96.
 - RTP SSRC: `0x42545036` (`BTP6`), matching the device-proven artifact.
@@ -142,3 +200,15 @@ path is considered device-verified, a run must observe in order:
 
 A retained-bond fast reconnect option is intentionally absent until repeated
 true-device runs demonstrate at least 95% reliability across supported peers.
+
+## REDMI Buds 8 Pro validation status
+
+The device run of module SHA-256 `c43f269b…cfa98e23` confirmed fresh pairing,
+the `mhdt-fixed` receive path, successful signaling Configuration, DISCOVER,
+GET ALL CAPABILITIES, bitpool-39 negotiation, SET CONFIGURATION/OPEN, the media
+channel, and audible SBC test-tone output. One apparent connection-time crash
+was not reproducible on the subsequent run and has no crash artifact, so it is
+recorded as an unresolved transient rather than attributed to the SBC change.
+The final staged `f3d9381d…bad76862` differs only by displaying the packetizer's
+actual bitpool instead of the former hard-coded 53. Repeated clean disconnect,
+second-session, and 95% reliability gates remain open.

@@ -1,29 +1,21 @@
+use crate::sbc_tone_frames;
+
 pub const SAMPLE_RATE: u32 = 44_100;
 pub const FRAME_SAMPLES: u32 = 128;
-pub const FRAME_LENGTH: usize = 118;
+pub const MAX_FRAME_LENGTH: usize = 118;
 pub const RTP_HEADER: usize = 12;
 pub const SBC_HEADER: usize = 1;
 pub const MAX_FRAMES_PER_PACKET: u8 = 5;
 pub const MAX_PACKET: usize =
-    RTP_HEADER + SBC_HEADER + MAX_FRAMES_PER_PACKET as usize * FRAME_LENGTH;
+    RTP_HEADER + SBC_HEADER + MAX_FRAMES_PER_PACKET as usize * MAX_FRAME_LENGTH;
 pub const TONE_SECONDS: u32 = 5;
-
-pub const TEST_TONE_FRAME: [u8; FRAME_LENGTH] = [
-    0x9c, 0xb9, 0x35, 0xe2, 0xc2, 0, 0, 0, 0xc2, 0, 0, 0, 0xc7, 0x02, 0xd4, 0x8c, 0x70, 0x1a, 0x97,
-    0x53, 0x82, 0xb2, 0xf5, 0x37, 0x56, 0x4e, 0x3f, 0x0a, 0x88, 0xe3, 0xf1, 0x50, 0x2b, 0x1d, 0x50,
-    0xa2, 0xb1, 0xea, 0x1c, 0x70, 0x2d, 0x48, 0xc7, 0x01, 0xa9, 0x75, 0x38, 0x2b, 0x2f, 0x53, 0x75,
-    0x64, 0xe3, 0xf0, 0xa8, 0x8e, 0x3f, 0x15, 0x02, 0xb1, 0xd5, 0x0a, 0x2b, 0x1e, 0xa1, 0xc7, 0x02,
-    0xd4, 0x8c, 0x70, 0x1a, 0x97, 0x53, 0x82, 0xb2, 0xf5, 0x37, 0x56, 0x4e, 0x3f, 0x0a, 0x88, 0xe3,
-    0xf1, 0x50, 0x2b, 0x1d, 0x50, 0xa2, 0xb1, 0xea, 0x1c, 0x70, 0x2d, 0x48, 0xc7, 0x01, 0xa9, 0x75,
-    0x38, 0x2b, 0x2f, 0x53, 0x75, 0x64, 0xe3, 0xf0, 0xa8, 0x8e, 0x3f, 0x15, 0x02, 0xb1, 0xd5, 0x0a,
-    0x2b, 0x1e, 0xa1,
-];
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MediaError {
     Mtu,
     Complete,
     Buffer,
+    Codec,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -34,17 +26,20 @@ pub struct TonePacketizer {
     pub frames_sent: u32,
     pub packets_target: u32,
     pub frames_per_packet: u8,
+    pub bitpool: u8,
+    pub frame_length: u16,
     pace_remainder: u32,
 }
 
 impl TonePacketizer {
-    pub fn new(mtu: u16) -> Result<Self, MediaError> {
+    pub fn new(mtu: u16, bitpool: u8) -> Result<Self, MediaError> {
+        let frame_length = sbc_tone_frames::frame_length(bitpool).ok_or(MediaError::Codec)?;
         let limit = usize::from(mtu).min(672);
         let mut frames = MAX_FRAMES_PER_PACKET;
-        while frames > 1 && RTP_HEADER + SBC_HEADER + frames as usize * FRAME_LENGTH > limit {
+        while frames > 1 && RTP_HEADER + SBC_HEADER + frames as usize * frame_length > limit {
             frames -= 1;
         }
-        if RTP_HEADER + SBC_HEADER + FRAME_LENGTH > limit {
+        if RTP_HEADER + SBC_HEADER + frame_length > limit {
             return Err(MediaError::Mtu);
         }
         let packet_samples = frames as u32 * FRAME_SAMPLES;
@@ -56,6 +51,8 @@ impl TonePacketizer {
             frames_sent: 0,
             packets_target,
             frames_per_packet: frames,
+            bitpool,
+            frame_length: frame_length as u16,
             pace_remainder: 0,
         })
     }
@@ -68,8 +65,9 @@ impl TonePacketizer {
         if self.is_complete() {
             return Err(MediaError::Complete);
         }
+        let frame_length = usize::from(self.frame_length);
         let frames = self.frames_per_packet as usize;
-        let length = RTP_HEADER + SBC_HEADER + frames * FRAME_LENGTH;
+        let length = RTP_HEADER + SBC_HEADER + frames * frame_length;
         if out.len() < length {
             return Err(MediaError::Buffer);
         }
@@ -80,8 +78,10 @@ impl TonePacketizer {
         out[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
         out[8..12].copy_from_slice(&0x4254_5036u32.to_be_bytes());
         out[12] = self.frames_per_packet;
-        for chunk in out[13..length].chunks_exact_mut(FRAME_LENGTH) {
-            chunk.copy_from_slice(&TEST_TONE_FRAME);
+        for chunk in out[13..length].chunks_exact_mut(frame_length) {
+            if sbc_tone_frames::write_frame(self.bitpool, chunk) != Some(frame_length) {
+                return Err(MediaError::Codec);
+            }
         }
         self.packets_sent += 1;
         self.frames_sent += self.frames_per_packet as u32;

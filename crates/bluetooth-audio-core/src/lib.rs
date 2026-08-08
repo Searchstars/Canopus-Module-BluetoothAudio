@@ -8,6 +8,7 @@ pub mod controller;
 pub mod discovery;
 pub mod media;
 pub mod model;
+mod sbc_tone_frames;
 pub mod ui;
 
 pub use address::{Address, AddressText};

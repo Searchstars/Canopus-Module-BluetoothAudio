@@ -1,6 +1,7 @@
 use crate::{
     ConnectionState, Model, PAIR_DIAG_BONDED, PAIR_DIAG_DISPLAY, PAIR_DIAG_FILTER_HIT,
-    PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST, ScanState,
+    PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST,
+    ScanState,
 };
 use canopus_ui_core::{Snapshot, TextStyle, Tree, UiError};
 use core::fmt::{self, Write};
@@ -141,6 +142,7 @@ fn pairing_diagnostic(model: &Model) -> FixedText<96> {
         (PAIR_DIAG_REMOVE_PENDING, " remove-wait"),
         (PAIR_DIAG_REMOVE_CONFIRMED, " removed"),
         (PAIR_DIAG_FILTER_HIT, " filter-hit"),
+        (PAIR_DIAG_MHDT_FIXED, " mhdt-fixed"),
         (PAIR_DIAG_REQUEST, " request"),
         (PAIR_DIAG_DISPLAY, " confirm"),
         (PAIR_DIAG_BONDED, " bonded"),

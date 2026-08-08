@@ -30,7 +30,8 @@ use canopus_target_private::*;
 
 use canopus_bluetooth_audio_core::{
     ConnectionState, PAIR_DIAG_BONDED, PAIR_DIAG_DISPLAY, PAIR_DIAG_FILTER_HIT,
-    PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST, StreamState, ui,
+    PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST,
+    StreamState, ui,
 };
 
 use runtime::*;
@@ -145,6 +146,7 @@ fn sync_target_model(core: &mut Core) {
     let mut pairing_flags = 0u8;
     for (runtime_flag, diagnostic_flag) in [
         (FLAG_CORE_FILTER_HIT, PAIR_DIAG_FILTER_HIT),
+        (FLAG_HCI_COMPAT_HIT, PAIR_DIAG_MHDT_FIXED),
         (FLAG_PAIR_REQUEST_SEEN, PAIR_DIAG_REQUEST),
         (FLAG_PAIR_DISPLAY_SEEN, PAIR_DIAG_DISPLAY),
         (FLAG_BONDED, PAIR_DIAG_BONDED),
