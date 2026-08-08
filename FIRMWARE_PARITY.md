@@ -25,7 +25,7 @@ SBC stream.
 | Signaling L2CAP | PSM `0x0019`, 68-byte request | `submit_connect`: local receive MTU `0x0400`, option bit 0 enabled |
 | AVDTP | DISCOVER, GET ALL CAPABILITIES/fallback, SET CONFIGURATION, OPEN | `avdtp::Source` |
 | Media L2CAP | second outbound PSM `0x0019` | `media_submit_connect`: same local receive MTU policy |
-| Stream | START, RTP/SBC, SUSPEND | `TonePacketizer` and media timer |
+| Stream | START, RTP/SBC, SUSPEND | `TonePacketizer` or MP3 `StreamPacketizer`, software SBC, and owner timers |
 
 ## Host-mode Pair Request policy
 
@@ -161,6 +161,47 @@ does not explain the paired `2820 + 7F` selection.
 - RTP SSRC: `0x42545036` (`BTP6`), matching the device-proven artifact.
 - Full tone: 345 packets and 1,725 frames.
 - Media timer event: 9; tag: `A2DPM`; one-shot flag: 1.
+- AVDTP Delay Report is retained in 100-microsecond units instead of merely
+  acknowledged. At START the source queues a bounded presentation-buffer burst
+  sized from that report (11 packets for REDMI's 150 ms report, with 150 ms as
+  the fallback), then waits all but one packet interval before normal pacing.
+  After the last packet it waits the reported presentation delay plus one final
+  packet interval before marking that tone complete. The accepted AVDTP stream
+  remains active, avoiding a peer-specific SUSPEND/START round trip between
+  playback chunks while preserving the five-second RTP timeline.
+- A second Play action installs a fresh packetizer on the live stream. If the
+  peer closed only the media channel while idle, the action reconnects PSM
+  `0x0019` and continues after its completion callback rather than returning
+  `-1201`. A remote-initiated SUSPEND still transitions the source back to OPEN
+  and the next Play uses the normal START command.
+
+## Third-party MP3 stream candidate
+
+The target-independent `/dev/canopus_audio` ABI now feeds a bounded owner-thread
+pipeline: 16 KiB compressed ring, incremental `nanomp3`, stereo S16 with 0..100
+software gain, bounded phase-carrying 24/48→44.1-kHz linear resampling (the
+packaged real-audio fixture exercises 24 kHz and a host fixture exercises 48 kHz;
+44.1-kHz input remains direct), the vendored BlueZ
+SBC encoder at the negotiated bitpool, and
+variable-length RTP packets paced by a generation-checked timer. START creates a
+fresh playback generation; PAUSE/RESUME retain decoder and encoder state; STOP,
+FLUSH, close, and DRAIN invalidate stale work with distinct semantics.
+
+Large decoder, PCM, SBC, input-ring, and mutable core storage is allocated from
+target-owned RAM rather than the module image or a firmware callback stack. The
+75 KiB loaded artifact fits target-pack revision 3's 80 KiB project budget. A
+build-generated constructor fixup encodes only verifier-reported codec-table
+words that accidentally resemble XIP addresses, then restores them in modlib RAM
+before Rust executes; the final ELF remains zero-import and verifier-clean.
+Host tests cover fragmented MP3 writes, in-place workspace initialization, state
+generations, volume conversion, RTP progression, and decoding/resampling the exact
+packaged 24-kHz long-audio resource. The build strips only its 1.13 MiB ID3
+artwork (without transcoding audio) before the installer copies the audio-only
+stream to `/data/canopus/tmp_btaudio_module_long_audio_test.mp3`; the Headphones detail page
+exposes a separate **Play long MP3** action that feeds it incrementally through
+the same exclusive input state machine and owner-thread pipeline. CPU cost, heap headroom,
+startup prebuffering, pause/drain behavior, and sustained playback remain device
+gates; this candidate must not yet be described as device-stable.
 
 ## Deliberate safety extensions
 
@@ -193,7 +234,7 @@ path is considered device-verified, a run must observe in order:
 7. signaling CID/MTU and first DISCOVER;
 8. SET CONFIGURATION and OPEN;
 9. media CID/MTU and START;
-10. 345 RTP/SBC packets followed by SUSPEND;
+10. 345 RTP/SBC packets, presentation drain, and reusable active stream;
 11. clean media and signaling disconnect callbacks;
 12. a second complete fresh-pair run without a stale callback changing the new
     session.
@@ -209,6 +250,15 @@ GET ALL CAPABILITIES, bitpool-39 negotiation, SET CONFIGURATION/OPEN, the media
 channel, and audible SBC test-tone output. One apparent connection-time crash
 was not reproducible on the subsequent run and has no crash artifact, so it is
 recorded as an unresolved transient rather than attributed to the SBC change.
-The final staged `f3d9381d…bad76862` differs only by displaying the packetizer's
-actual bitpool instead of the former hard-coded 53. Repeated clean disconnect,
-second-session, and 95% reliability gates remain open.
+The staged `6c31e946…f24a0d8a` candidate retained Delay Report and applied the
+bounded START burst. Device validation confirmed that it synchronized both TWS
+ears, but measured about ten seconds from Starting to Streaming plus another
+three seconds to audible output, and a second tone still could not start. The
+current target-selected candidate `f50853d4…fd239779` therefore keeps the first
+accepted AVDTP stream active between tone chunks, installs a new packetizer for
+each Play, and reconnects only a peer-closed media L2CAP channel. It also moves
+descriptor registration behind the identity-guarded Rust private ABI facade and
+contains no firmware addresses in the C constructor. Host tests, full Canopus
+CI, ARM build, build-plan, verifier, receipt signing, and watchface smoke tests
+pass; repeat playback still requires device validation. Repeated clean
+disconnect, second-session, and 95% reliability gates remain open.

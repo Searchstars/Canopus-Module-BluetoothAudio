@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
-ELF=${1:?usage: verify-device.sh path/to/module.elf}
+ELF=${1:?usage: verify-device.sh path/to/module.elf [max-loaded-size]}
+MAX_SIZE=${2:-65536}
 
 # The firmware loader maps only SHF_ALLOC sections into module memory (the
 # loaded image); the file also carries symtab/strtab/shstrtab/relocations that
@@ -22,8 +23,8 @@ print(loaded)
 PY
 )
 
-if [ "$LOADED" -gt 65536 ]; then
-  echo "module exceeds target max_size: $LOADED > 65536 (loaded image)" >&2
+if [ "$LOADED" -gt "$MAX_SIZE" ]; then
+  echo "module exceeds target max_size: $LOADED > $MAX_SIZE (loaded image)" >&2
   exit 1
 fi
 
@@ -34,4 +35,4 @@ if "$NM" -u "$ELF" | grep -q .; then
   exit 1
 fi
 file "$ELF"
-echo "verified module loaded size: $LOADED bytes (limit 65536)"
+echo "verified module loaded size: $LOADED bytes (limit $MAX_SIZE)"

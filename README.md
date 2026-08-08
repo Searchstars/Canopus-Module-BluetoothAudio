@@ -6,14 +6,26 @@
 
 ```sh
 git clone https://github.com/AstralSightStudios/Canopus
-git clone https://github.com/Searchstars/Canopus-Module-Blutooth-Audio
+git clone https://github.com/Searchstars/Canopus-Module-BluetoothAudio
 
 cargo test --workspace
 scripts/build-device.sh
 
 ```
 
-注：该模块与Canopus框架属于并行开发关系，我希望利用在开发该模块过程中所获得的经验来完善Canopus框架，因此对Canopus框架的引用属于本地引用。在构建时，请确保Canopus框架项目文件夹与该项目文件夹同级。
+注：该模块与Canopus框架属于并行开发关系，我希望利用在开发该模块过程中所获得的经验来完善Canopus框架，因此对Canopus框架的引用属于本地引用。在构建时，请确保Canopus框架项目文件夹与该项目文件夹同级。依赖路径使用相对路径，不绑定某台开发机的绝对目录；`CANOPUS_ROOT` 可覆盖构建脚本使用的 CLI、SDK 头文件和 target-pack checkout。
+
+### Target 选择
+
+Rust 私有 ABI 由 `canopus-target-private` facade 的互斥 `target-*` feature 选择。模块构建脚本读取 `targets/<target-id>.env`，由该文件映射 Cargo feature、Rust target triple、CPU 与 loader 大小限制。当前默认值为：
+
+```sh
+CANOPUS_TARGET=xiaomi-band-10-pro-3.101.030 scripts/build-device.sh
+# 构建 Canopus.toml include 的全部 target：
+scripts/build-targets.sh
+```
+
+产物位于 `build/<target-id>/bluetooth-audio.elf`。增加新 target 时，需要先添加独立 target pack 和经过验证的 private ABI backend，再添加对应 `.env` profile；Bluetooth/AVDTP 模块逻辑、descriptor target ID 和 C constructor 不应出现新的固件地址或 target 常量。缺失或未知 target 会在调用私有 ABI 前 fail closed。
 
 交叉编译需要在 **nightly** 工具链（`cargo +nightly`）下运行，请确保已安装该工具链（`rustup toolchain install nightly`）。编译出的交叉二进制文件通过以下两个手段来控制体积：
 

@@ -9,6 +9,8 @@ local TOKEN = "bluetooth_audio"
 local DEVICE_PATH = "/dev/canopus"
 local RECEIPT_RESOURCE = SCRIPT_PATH .. "receipt.bin"
 local MODULE_RESOURCE = SCRIPT_PATH .. "module.bin"
+local LONG_AUDIO_RESOURCE = SCRIPT_PATH .. "long_test_audio_stream.bin"
+local LONG_AUDIO_PATH = "/data/canopus/tmp_btaudio_module_long_audio_test.mp3"
 local INBOX = "/data/canopus/inbox/"
 local RECEIPT_PATH = INBOX .. TOKEN .. ".cmi"
 local MODULE_PATH = INBOX .. TOKEN .. ".ko"
@@ -94,6 +96,17 @@ local function stage_files()
         or module:sub(1, 4) ~= "\127ELF" then
         return false, "Missing or invalid ARM module"
     end
+    local long_audio = io.open(LONG_AUDIO_RESOURCE, "rb")
+    if not long_audio then
+        return false, "Missing long MP3 test resource"
+    end
+    local long_audio_prefix = long_audio:read(2)
+    long_audio:close()
+    local first, second
+    if long_audio_prefix then first, second = long_audio_prefix:byte(1, 2) end
+    if first ~= 0xFF or not second or second < 0xE0 then
+        return false, "Invalid long MP3 test resource"
+    end
     local probe = io.open(RECEIPT_PATH, "wb")
     if probe then probe:close() else
         os.execute("mkdir /data/canopus")
@@ -104,6 +117,20 @@ local function stage_files()
     end
     if not write_all(MODULE_PATH, module) then
         return false, "Cannot stage module"
+    end
+    os.execute("cp " .. LONG_AUDIO_RESOURCE .. " " .. LONG_AUDIO_PATH)
+    local staged_audio = io.open(LONG_AUDIO_PATH, "rb")
+    if not staged_audio then
+        return false, "Cannot stage long MP3 test audio"
+    end
+    local staged_audio_prefix = staged_audio:read(2)
+    staged_audio:close()
+    local staged_first, staged_second
+    if staged_audio_prefix then
+        staged_first, staged_second = staged_audio_prefix:byte(1, 2)
+    end
+    if staged_first ~= 0xFF or not staged_second or staged_second < 0xE0 then
+        return false, "Invalid staged long MP3 test audio"
     end
     -- Byte-for-byte readback. The firmware's os.execute cannot run `chmod`
     -- (installer versions without it staged and installed cleanly on-device),

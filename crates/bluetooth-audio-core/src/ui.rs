@@ -12,6 +12,7 @@ pub const EVENT_REFRESH: u32 = 3;
 pub const EVENT_BACK: u32 = 4;
 pub const EVENT_DISCONNECT: u32 = 5;
 pub const EVENT_TEST_TONE: u32 = 6;
+pub const EVENT_LONG_MP3: u32 = 7;
 pub const EVENT_DEVICE_BASE: u32 = 100;
 
 /// Stable semantic identity for a discovered-device row. Event ids still carry
@@ -113,14 +114,12 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.status_row(32, "SBC bitpool", bitpool.as_str())?;
     let packets = unsigned(model.details.packets_sent);
     tree.status_row(33, "Packets", packets.as_str())?;
+    let can_play =
+        model.connection == ConnectionState::Ready && model.stream == crate::StreamState::Open;
+    tree.button(34, "Play test tone", EVENT_TEST_TONE, can_play)?;
+    tree.button(35, "Play long MP3", EVENT_LONG_MP3, can_play)?;
     tree.button(
-        34,
-        "Play test tone",
-        EVENT_TEST_TONE,
-        model.connection == ConnectionState::Ready && model.stream == crate::StreamState::Open,
-    )?;
-    tree.button(
-        35,
+        36,
         "Disconnect",
         EVENT_DISCONNECT,
         model.connection == ConnectionState::Ready,
@@ -193,7 +192,7 @@ fn stream_detail(state: crate::StreamState) -> &'static str {
         crate::StreamState::Opening => "Opening",
         crate::StreamState::Open => "Ready",
         crate::StreamState::Starting => "Starting",
-        crate::StreamState::Streaming => "Playing test tone",
+        crate::StreamState::Streaming => "Playing audio",
         crate::StreamState::Suspending => "Stopping",
         crate::StreamState::Failed => "Failed",
     }

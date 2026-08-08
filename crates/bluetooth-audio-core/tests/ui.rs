@@ -60,15 +60,17 @@ fn overview_exposes_pairing_milestones_without_extra_rows() {
 }
 
 #[test]
-fn detail_enables_tone_only_when_stream_ready() {
+fn detail_enables_audio_tests_only_when_stream_ready() {
     let mut model = Model {
         connected: Some(Default::default()),
         ..Default::default()
     };
     let first = ui::detail(&model).unwrap();
     assert!(!first.find_by_key(34).unwrap().enabled());
+    assert!(!first.find_by_key(35).unwrap().enabled());
     model.connection = ConnectionState::Ready;
     model.stream = StreamState::Open;
     let ready = ui::detail(&model).unwrap();
     assert!(ready.find_by_key(34).unwrap().enabled());
+    assert!(ready.find_by_key(35).unwrap().enabled());
 }

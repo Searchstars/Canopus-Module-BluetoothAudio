@@ -1,38 +1,27 @@
+/* Stock modlib loader glue; target-private calls remain in Rust. */
 #include <stdint.h>
 
-#include "canopus_module_registration.h"
+/* Anchors for build-generated fixups that decode opaque codec-table words
+ * before Rust or the decoder can observe .rodata. The module is copied into
+ * writable RAM by stock modlib even though these sections are read-only ELF
+ * inputs. */
+__attribute__((section(".rodata"), used, aligned(4)))
+const uint8_t canopus_rodata_anchor[4] = {0};
+__attribute__((section(".rodata.cst16"), used, aligned(16)))
+const uint8_t canopus_rodata_cst16_anchor[16] = {0};
 
-#define CANOPUS_NUTTX_OPEN ((int (*)(const char *, int, ...))(uintptr_t)0x0C1C15B1u)
-#define CANOPUS_NUTTX_CLOSE ((int (*)(int))(uintptr_t)0x0C1AAB71u)
-#define CANOPUS_NUTTX_WRITE ((int32_t (*)(int, const void *, uint32_t))(uintptr_t)0x0C1C31C9u)
-#define CANOPUS_O_WRONLY 2
+extern void canopus_decode_opaque_words(void) __attribute__((weak));
 
-static const char canopus_device_path[] = "/dev/canopus";
-
-static void canopus_register_descriptor(void)
-{
-    extern const uint8_t canopus_module_descriptor[];
-    extern const void *canopus_module_descriptor_ptr(void);
-    static const struct canopus_module_registration_v1 registration = {
-        CANOPUS_MODULE_REGISTRATION_MAGIC,
-        (uint32_t)(uintptr_t)&canopus_module_descriptor,
-        "bluetooth_audio",
-    };
-    int fd = CANOPUS_NUTTX_OPEN(canopus_device_path, CANOPUS_O_WRONLY);
-
-    (void)canopus_module_descriptor_ptr();
-    if (fd >= 0) {
-        (void)CANOPUS_NUTTX_WRITE(fd, &registration, sizeof(registration));
-        (void)CANOPUS_NUTTX_CLOSE(fd);
-    }
-}
-
-/* Stock modlib loader glue; all module behavior is Rust. */
 __attribute__((constructor)) static void canopus_mod_ctor(void)
 {
     extern int canopus_mod_prepare(const void *);
+    extern int canopus_register_module_descriptor(void);
+
+    if (canopus_decode_opaque_words != 0) {
+        canopus_decode_opaque_words();
+    }
     (void)canopus_mod_prepare(0);
-    canopus_register_descriptor();
+    (void)canopus_register_module_descriptor();
 }
 
 __attribute__((destructor)) static void canopus_mod_dtor(void)

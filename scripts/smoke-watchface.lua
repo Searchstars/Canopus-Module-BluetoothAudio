@@ -42,6 +42,7 @@ local function installer_io(fault)
     local files = {
         ["/fake/receipt.bin"] = "CMI1" .. string.rep("\0", 252),
         ["/fake/module.bin"] = "\127ELF" .. string.rep("\0", 508),
+        ["/fake/long_test_audio_stream.bin"] = "\255\243",
     }
     local device_request
     local function open(path, mode)
@@ -94,7 +95,14 @@ local function check(path, fault)
     created = {}
     local state
     io.open, state = installer_io(fault)
-    os.execute = function() return true end
+    os.execute = function(command)
+        local _, files = state()
+        if command == "cp /fake/long_test_audio_stream.bin /data/canopus/tmp_btaudio_module_long_audio_test.mp3" then
+            files["/data/canopus/tmp_btaudio_module_long_audio_test.mp3"] =
+                files["/fake/long_test_audio_stream.bin"]
+        end
+        return true
+    end
     local ok, err = pcall(dofile, path)
     io.open = original_io_open
     os.execute = original_os_execute
