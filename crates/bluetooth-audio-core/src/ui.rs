@@ -13,6 +13,7 @@ pub const EVENT_BACK: u32 = 4;
 pub const EVENT_DISCONNECT: u32 = 5;
 pub const EVENT_TEST_TONE: u32 = 6;
 pub const EVENT_LONG_MP3: u32 = 7;
+pub const EVENT_LONG_MP3_DECODE_ONLY: u32 = 8;
 pub const EVENT_DEVICE_BASE: u32 = 100;
 
 /// Stable semantic identity for a discovered-device row. Event ids still carry
@@ -146,10 +147,43 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.status_row(42, "Underruns", underruns.as_str())?;
     let audio_error = number(model.details.audio_error);
     tree.status_row(43, "Audio error", audio_error.as_str())?;
+    let mut timing = FixedText::<40>::default();
+    let _ = write!(
+        timing,
+        "{} ms / decode {} ms",
+        model.details.audio_elapsed_ms, model.details.decode_cpu_ms
+    );
+    tree.status_row(45, "Timing", timing.as_str())?;
+    let realtime_percent = if model.details.audio_elapsed_ms == 0 {
+        0
+    } else {
+        (u64::from(model.details.pcm_frames) * 100_000
+            / (44_100 * u64::from(model.details.audio_elapsed_ms))) as u32
+    };
+    let mut speed = FixedText::<24>::default();
+    let _ = write!(speed, "{}% realtime", realtime_percent);
+    tree.status_row(46, "Decode rate", speed.as_str())?;
+    let startup = unsigned(model.details.startup_ms);
+    tree.status_row(47, "Startup ms", startup.as_str())?;
+    let rtp_per_second = if model.details.audio_elapsed_ms == 0 {
+        0
+    } else {
+        (u64::from(model.details.audio_rtp_packets) * 1_000
+            / u64::from(model.details.audio_elapsed_ms)) as u32
+    };
+    let mut rtp_rate = FixedText::<24>::default();
+    let _ = write!(rtp_rate, "{} packets/s", rtp_per_second);
+    tree.status_row(48, "RTP rate", rtp_rate.as_str())?;
     let can_play =
         model.connection == ConnectionState::Ready && model.stream == crate::StreamState::Open;
     tree.button(34, "Play test tone", EVENT_TEST_TONE, can_play)?;
     tree.button(35, "Play long MP3", EVENT_LONG_MP3, can_play)?;
+    tree.button(
+        44,
+        "Decode long MP3 only",
+        EVENT_LONG_MP3_DECODE_ONLY,
+        can_play,
+    )?;
     tree.button(
         36,
         "Disconnect",
@@ -258,6 +292,7 @@ fn audio_stage_detail(stage: u8) -> &'static str {
         8 => "Draining",
         9 => "Complete",
         10 => "Failed",
+        11 => "Decode only",
         _ => "Unknown",
     }
 }

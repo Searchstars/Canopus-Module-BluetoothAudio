@@ -142,6 +142,9 @@ pub struct Runtime {
     pub media_cid: AtomicU32,
     pub media_mtu: AtomicU32,
     pub media_generation: AtomicU32,
+    /// RTP SDUs accepted by the stock L2CAP queue but not yet covered by an
+    /// event-8 completion credit. This bounds producer pressure on bluelet.
+    pub media_tx_outstanding: AtomicU32,
     pub media_packets_sent: AtomicU32,
     pub media_frames_sent: AtomicU32,
     pub media_packets_target: AtomicU32,
@@ -199,6 +202,7 @@ impl Runtime {
             media_cid: AtomicU32::new(0),
             media_mtu: AtomicU32::new(0),
             media_generation: AtomicU32::new(0),
+            media_tx_outstanding: AtomicU32::new(0),
             media_packets_sent: AtomicU32::new(0),
             media_frames_sent: AtomicU32::new(0),
             media_packets_target: AtomicU32::new(0),

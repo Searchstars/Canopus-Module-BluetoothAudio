@@ -1,6 +1,6 @@
 use nanomp3::{Decoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
 
-pub const REQUIRED_INPUT_WINDOW: usize = 4 * 1024;
+pub const REQUIRED_INPUT_WINDOW: usize = 16 * 1024;
 pub const MIN_DECODE_INPUT: usize = 2 * 1024;
 pub const REQUIRED_SAMPLE_RATE: u32 = 44_100;
 pub const RESAMPLED_SAMPLE_RATE_24K: u32 = 24_000;

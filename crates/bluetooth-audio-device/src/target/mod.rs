@@ -184,6 +184,7 @@ fn sync_target_model(core: &mut Core) {
         changed = true;
     }
     let audio = audio_device::input().status();
+    let (audio_elapsed_ms, decode_cpu_ms, startup_ms) = audio_stream::diagnostic_timing();
     let audio_stage = audio_stream::diagnostic_stage() as u8;
     let bitpool = if audio.negotiated_bitpool != 0 {
         audio.negotiated_bitpool as u8
@@ -206,6 +207,9 @@ fn sync_target_model(core: &mut Core) {
         || details.pcm_frames != audio.pcm_frames
         || details.audio_rtp_packets != audio.rtp_packets
         || details.underruns != audio.underruns
+        || details.audio_elapsed_ms != audio_elapsed_ms
+        || details.decode_cpu_ms != decode_cpu_ms
+        || details.startup_ms != startup_ms
         || details.audio_error != audio_error
     {
         details.bitpool = bitpool;
@@ -217,6 +221,9 @@ fn sync_target_model(core: &mut Core) {
         details.pcm_frames = audio.pcm_frames;
         details.audio_rtp_packets = audio.rtp_packets;
         details.underruns = audio.underruns;
+        details.audio_elapsed_ms = audio_elapsed_ms;
+        details.decode_cpu_ms = decode_cpu_ms;
+        details.startup_ms = startup_ms;
         details.audio_error = audio_error;
         changed = true;
     }
@@ -304,6 +311,7 @@ pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u
                 | (31, ui::EVENT_REFRESH)
                 | (34, ui::EVENT_TEST_TONE)
                 | (35, ui::EVENT_LONG_MP3)
+                | (44, ui::EVENT_LONG_MP3_DECODE_ONLY)
                 | (36, ui::EVENT_DISCONNECT)
                 | (1, ui::EVENT_BACK)
         )
@@ -373,20 +381,48 @@ fn handle_action(page_index: usize, event_id: u32) {
         return;
     }
     if event_id == ui::EVENT_LONG_MP3 {
-        with_core(|core| {
+        // Publish Starting before enqueueing work, but never enqueue while the
+        // UI context owns CORE_LOCK. The Bluetooth owner may run the work
+        // immediately; queueing under the lock creates a priority inversion.
+        let ready = with_core(|core| {
             if core.controller.model.connection == ConnectionState::Ready
                 && core.controller.model.stream == StreamState::Open
             {
-                match audio_stream::start_long_test() {
-                    Ok(()) => {
-                        runtime().last_error.store(0, Ordering::Release);
-                        core.controller.model.stream = StreamState::Starting;
-                        core.controller.model.touch();
-                    }
-                    Err(error) => runtime().last_error.store(error, Ordering::Release),
-                }
+                core.controller.model.stream = StreamState::Starting;
+                core.controller.model.touch();
+                true
+            } else {
+                false
             }
         });
+        if ready {
+            match audio_stream::start_long_test() {
+                Ok(()) => runtime().last_error.store(0, Ordering::Release),
+                Err(error) => {
+                    runtime().last_error.store(error, Ordering::Release);
+                    with_core(|core| {
+                        if core.controller.model.stream == StreamState::Starting {
+                            core.controller.model.stream = StreamState::Open;
+                            core.controller.model.touch();
+                        }
+                    });
+                }
+            }
+        }
+        rebuild(page_index);
+        return;
+    }
+    if event_id == ui::EVENT_LONG_MP3_DECODE_ONLY {
+        let ready = with_core(|core| {
+            core.controller.model.connection == ConnectionState::Ready
+                && core.controller.model.stream == StreamState::Open
+        });
+        if ready {
+            match audio_stream::start_long_test_decode_only() {
+                Ok(()) => runtime().last_error.store(0, Ordering::Release),
+                Err(error) => runtime().last_error.store(error, Ordering::Release),
+            }
+        }
         rebuild(page_index);
         return;
     }

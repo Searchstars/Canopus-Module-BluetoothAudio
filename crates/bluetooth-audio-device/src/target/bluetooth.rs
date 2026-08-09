@@ -573,7 +573,9 @@ extern "C" fn deferred_discovery_work(
         return 0;
     }
     let device = unsafe { (*event).device };
-    with_core(|core| core.controller.discovery_result(device));
+    if try_with_core(|core| core.controller.discovery_result(device)).is_none() {
+        runtime().last_error.store(ERRNO_EBUSY, Ordering::Release);
+    }
     unsafe { bt_free(argument) };
     0
 }
@@ -659,7 +661,9 @@ extern "C" fn deferred_core_work(
     }
     let kind = event.kind;
     let address = event.address;
-    with_core(|core| apply_core_event(core, kind, address));
+    if try_with_core(|core| apply_core_event(core, kind, address)).is_none() {
+        runtime().last_error.store(ERRNO_EBUSY, Ordering::Release);
+    }
     unsafe { bt_free(argument) };
     0
 }
