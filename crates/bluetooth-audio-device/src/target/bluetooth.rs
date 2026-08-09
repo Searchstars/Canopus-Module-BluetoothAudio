@@ -198,10 +198,13 @@ fn arm_bond_timer(phase: u8, delay_ms: u32) -> Result<(), i32> {
         r.last_error.store(ERR_ALLOC, Ordering::Release);
         return Err(ERR_ALLOC);
     }
+    let transaction = r.bond_generation.load(Ordering::Acquire);
+    r.bond_timer_phase
+        .store(u32::from(phase), Ordering::Release);
     unsafe {
         token.write(BondTimerToken {
             generation: r.generation,
-            transaction: r.bond_generation.load(Ordering::Acquire),
+            transaction,
             phase,
             reserved: [0; 3],
         });
@@ -219,12 +222,32 @@ fn arm_bond_timer(phase: u8, delay_ms: u32) -> Result<(), i32> {
     };
     if handle == 0 {
         unsafe { bt_free(token.cast()) };
+        let _ = r.bond_timer_phase.compare_exchange(
+            u32::from(phase),
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         r.last_error.store(ERR_ALLOC, Ordering::Release);
         return Err(ERR_ALLOC);
     }
-    r.bond_timer_phase
-        .store(u32::from(phase), Ordering::Release);
-    r.bond_timer_handle.store(handle, Ordering::Release);
+    if r.bond_timer_handle
+        .compare_exchange(0, handle, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let mut duplicate = handle;
+        unsafe { bt_timer_cancel(&mut duplicate) };
+        return Err(ERR_STATE);
+    }
+    if (r.bond_generation.load(Ordering::Acquire) != transaction
+        || r.bond_timer_phase.load(Ordering::Acquire) != u32::from(phase))
+        && r.bond_timer_handle
+            .compare_exchange(handle, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let mut stale = handle;
+        unsafe { bt_timer_cancel(&mut stale) };
+    }
     Ok(())
 }
 

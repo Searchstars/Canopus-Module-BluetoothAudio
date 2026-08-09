@@ -4253,7 +4253,18 @@ unsafe fn L3_huffman(
         }
     }
     np = 1 as i32 - big_val_cnt;
+    // A Layer III granule contains at most 576 spectral lines. Keep the
+    // translated count1 loop bounded by the space left after the big-values
+    // pairs: malformed state can otherwise leave `np` negative while a
+    // zero-width Huffman leaf consumes no bits, making this loop permanent.
+    let mut count1_quads: i32 = 0;
+    let count1_limit: i32 =
+        (576 as i32 - 2 as i32 * (*gr_info).big_values as i32).max(0 as i32) / 4 as i32;
     loop {
+        if count1_quads >= count1_limit {
+            break;
+        }
+        count1_quads += 1;
         let mut codebook_count1: *const uint8_t = if (*gr_info).count1_table as i32 != 0 {
             tab33.as_ptr()
         } else {

@@ -95,7 +95,7 @@ pub struct Core {
     pub source: avdtp::Source,
     pub packetizer: Option<media::TonePacketizer>,
     pub signaling_out: [u8; 192],
-    pub media_out: [u8; 640],
+    pub media_out: [u8; media::MAX_PACKET],
 }
 
 impl Core {
@@ -105,7 +105,7 @@ impl Core {
             source: avdtp::Source::new(generation),
             packetizer: None,
             signaling_out: [0; 192],
-            media_out: [0; 640],
+            media_out: [0; media::MAX_PACKET],
         }
     }
 }

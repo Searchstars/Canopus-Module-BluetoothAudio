@@ -23,7 +23,7 @@ print(loaded)
 PY
 )
 
-if [ "$LOADED" -gt "$MAX_SIZE" ]; then
+if [ "$MAX_SIZE" -ne 0 ] && [ "$LOADED" -gt "$MAX_SIZE" ]; then
   echo "module exceeds target max_size: $LOADED > $MAX_SIZE (loaded image)" >&2
   exit 1
 fi
@@ -35,4 +35,8 @@ if "$NM" -u "$ELF" | grep -q .; then
   exit 1
 fi
 file "$ELF"
-echo "verified module loaded size: $LOADED bytes (limit $MAX_SIZE)"
+if [ "$MAX_SIZE" -eq 0 ]; then
+  echo "verified module loaded size: $LOADED bytes (no project limit)"
+else
+  echo "verified module loaded size: $LOADED bytes (limit $MAX_SIZE)"
+fi

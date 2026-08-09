@@ -137,6 +137,116 @@ fn assert_resampled_stream(mp3: &[u8], expected_rate: u32) {
     panic!("{expected_rate}-Hz MP3 produced {decoded_frames} silent resampled frames");
 }
 
+fn assert_complete_resampled_packetization(
+    mp3: &[u8],
+    expected_rate: u32,
+    source_frames_per_mp3_frame: usize,
+) {
+    const SBC_FRAMES: usize = 128;
+    const SBC_FRAMES_PER_PACKET: usize = 5;
+
+    let mut stream = Mp3ByteStream::new();
+    let mut cursor = 0usize;
+    let mut decoded_mp3_frames = 0usize;
+    let mut output_frames = 0usize;
+    let mut carry = 0usize;
+    let mut packets = 0usize;
+    let mut sbc_frames_encoded = 0usize;
+    let mut pcm = [0i16; 2304];
+    let chunks = [17usize, 509, 2048, 73, 4096, 3, 997];
+    let mut chunk_index = 0usize;
+
+    while cursor < mp3.len() {
+        let requested = chunks[chunk_index % chunks.len()];
+        chunk_index += 1;
+        let count = requested.min(stream.free()).min(mp3.len() - cursor);
+        if count != 0 {
+            cursor += stream.push(&mp3[cursor..cursor + count]);
+        }
+        loop {
+            match stream.decode_next(100, &mut pcm, false).unwrap() {
+                StreamProgress::NeedInput => break,
+                StreamProgress::Skipped { consumed } => assert!(consumed > 0),
+                StreamProgress::Frame {
+                    frames,
+                    samples,
+                    sample_rate,
+                    channels,
+                    ..
+                } => {
+                    assert_eq!(sample_rate, expected_rate);
+                    assert_eq!(channels, 2);
+                    assert_eq!(samples, frames * 2);
+                    decoded_mp3_frames += 1;
+                    output_frames += frames;
+                    carry += frames;
+                    while carry >= SBC_FRAMES {
+                        let encoded = (carry / SBC_FRAMES).min(SBC_FRAMES_PER_PACKET);
+                        assert!((1..=SBC_FRAMES_PER_PACKET).contains(&encoded));
+                        carry -= encoded * SBC_FRAMES;
+                        sbc_frames_encoded += encoded;
+                        packets += 1;
+                    }
+                    assert!(carry < SBC_FRAMES);
+                }
+            }
+        }
+    }
+
+    loop {
+        match stream.decode_next(100, &mut pcm, true).unwrap() {
+            StreamProgress::NeedInput => break,
+            StreamProgress::Skipped { consumed } => assert!(consumed > 0),
+            StreamProgress::Frame {
+                frames,
+                sample_rate,
+                channels,
+                ..
+            } => {
+                assert_eq!(sample_rate, expected_rate);
+                assert_eq!(channels, 2);
+                decoded_mp3_frames += 1;
+                output_frames += frames;
+                carry += frames;
+                while carry >= SBC_FRAMES {
+                    let encoded = (carry / SBC_FRAMES).min(SBC_FRAMES_PER_PACKET);
+                    carry -= encoded * SBC_FRAMES;
+                    sbc_frames_encoded += encoded;
+                    packets += 1;
+                }
+                assert!(carry < SBC_FRAMES);
+            }
+        }
+    }
+
+    let expected_output = (decoded_mp3_frames * source_frames_per_mp3_frame * 44_100)
+        .div_ceil(expected_rate as usize);
+    assert_eq!(output_frames, expected_output);
+    assert!(packets > 0);
+    assert_eq!(sbc_frames_encoded, output_frames / SBC_FRAMES);
+    assert!(carry < SBC_FRAMES);
+    if carry != 0 {
+        sbc_frames_encoded += 1;
+        packets += 1;
+    }
+    assert_eq!(sbc_frames_encoded, output_frames.div_ceil(SBC_FRAMES));
+    assert!(packets <= sbc_frames_encoded);
+    assert!(stream.discard_incomplete() < 2_000);
+}
+
+#[test]
+fn packetizes_complete_packaged_24khz_stream_without_losing_pcm_carry() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../watchfaces/bluetooth-audio/long_test_audio.bin");
+    let mp3 = std::fs::read(path).unwrap();
+    assert_complete_resampled_packetization(&mp3, 24_000, 576);
+}
+
+#[test]
+fn packetizes_complete_48khz_stream_without_losing_pcm_carry() {
+    assert_complete_resampled_packetization(MP3_48K, 48_000, 1152);
+}
+
 #[test]
 fn resamples_packaged_24khz_mp3_for_44100hz_sbc() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

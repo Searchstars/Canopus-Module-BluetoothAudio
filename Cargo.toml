@@ -21,3 +21,9 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = "debuginfo"
+
+# MP3 decode runs on the Bluetooth owner thread. Size-optimizing the translated
+# minimp3 hot loops makes them too slow for real-time playback and starves the
+# firmware heartbeat, so optimize only the decoder for throughput.
+[profile.release.package.nanomp3]
+opt-level = 3

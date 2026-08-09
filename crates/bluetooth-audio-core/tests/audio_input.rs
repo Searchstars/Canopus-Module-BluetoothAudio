@@ -1,5 +1,5 @@
 use canopus_bluetooth_audio_core::audio_input::{
-    AudioInput, FORMAT_MP3, FormatV1, InputError, STATE_BUFFERING, STATE_CONFIGURED,
+    AudioInput, FORMAT_MP3, FormatV1, InputError, InputRing, STATE_BUFFERING, STATE_CONFIGURED,
     STATE_DRAINING, STATE_PAUSED, STATE_STOPPED,
 };
 
@@ -28,6 +28,26 @@ fn ring_wraps_and_applies_backpressure_without_loss() {
     let mut rest = [0u8; 8];
     assert_eq!(input.consume(&mut rest), 8);
     assert_eq!(rest, [4, 5, 6, 7, 8, 9, 10, 11]);
+}
+
+#[test]
+fn ring_reset_invalidates_old_cursors_and_preserves_new_data() {
+    let ring = InputRing::<8>::new();
+    for epoch in 0..1024u32 {
+        let old = [epoch as u8; 6];
+        assert_eq!(ring.write(&old), old.len());
+        let mut prefix = [0u8; 2];
+        assert_eq!(ring.read(&mut prefix), prefix.len());
+        ring.reset();
+        assert_eq!(ring.used(), 0);
+
+        let new = [epoch.wrapping_add(1) as u8; 8];
+        assert_eq!(ring.write(&new), new.len());
+        let mut output = [0u8; 8];
+        assert_eq!(ring.read(&mut output), output.len());
+        assert_eq!(output, new);
+        assert_eq!(ring.used(), 0);
+    }
 }
 
 #[test]

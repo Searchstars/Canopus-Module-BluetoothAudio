@@ -1,6 +1,6 @@
 use nanomp3::{Decoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
 
-pub const REQUIRED_INPUT_WINDOW: usize = 16 * 1024;
+pub const REQUIRED_INPUT_WINDOW: usize = 4 * 1024;
 pub const MIN_DECODE_INPUT: usize = 2 * 1024;
 pub const REQUIRED_SAMPLE_RATE: u32 = 44_100;
 pub const RESAMPLED_SAMPLE_RATE_24K: u32 = 24_000;
@@ -180,22 +180,25 @@ impl Mp3Decoder {
             return Err(Mp3Error::Output);
         }
 
+        let mut index = (*phase / REQUIRED_SAMPLE_RATE) as usize;
+        let mut fraction = *phase % REQUIRED_SAMPLE_RATE;
         for pair in output[..needed].chunks_exact_mut(2) {
-            let index = (*phase / REQUIRED_SAMPLE_RATE) as usize;
             let next = (index + 1).min(frame.frames - 1);
-            let fraction = (*phase % REQUIRED_SAMPLE_RATE) as f32 / REQUIRED_SAMPLE_RATE as f32;
+            let blend = fraction as f32 * (1.0 / REQUIRED_SAMPLE_RATE as f32);
             for (channel, slot) in pair.iter_mut().enumerate() {
                 let source_channel = if frame.channels == 1 { 0 } else { channel };
                 let first = self.pcm[index * frame.channels as usize + source_channel];
                 let second = self.pcm[next * frame.channels as usize + source_channel];
-                let sample = first + (second - first) * fraction;
+                let sample = first + (second - first) * blend;
                 *slot = apply_volume(float_to_s16(sample), volume_percent);
             }
-            *phase = phase
-                .checked_add(frame.sample_rate)
-                .ok_or(Mp3Error::Output)?;
+            fraction += frame.sample_rate;
+            while fraction >= REQUIRED_SAMPLE_RATE {
+                fraction -= REQUIRED_SAMPLE_RATE;
+                index += 1;
+            }
         }
-        *phase -= span;
+        *phase = index as u32 * REQUIRED_SAMPLE_RATE + fraction - span;
         Ok(needed)
     }
 }

@@ -30,11 +30,16 @@ struct PageBackend {
     labels: [*mut core::ffi::c_void; UI_MAX_LABELS],
     row_kinds: [u8; UI_MAX_ROWS],
     row_keys: [u32; UI_MAX_ROWS],
+    row_hashes: [u32; UI_MAX_ROWS],
+    label_hashes: [u32; UI_MAX_LABELS],
     bindings: [Binding; UI_MAX_ROWS],
     row_count: u32,
     label_count: u32,
     rendered_generation: u32,
+    layout_hash: u32,
+    layout_count: u32,
     page_index: u8,
+    layout_valid: bool,
     active: bool,
     interactive: bool,
     refresh_failed: bool,
@@ -50,6 +55,8 @@ const fn empty_backend() -> PageBackend {
         labels: [core::ptr::null_mut(); UI_MAX_LABELS],
         row_kinds: [0; UI_MAX_ROWS],
         row_keys: [0; UI_MAX_ROWS],
+        row_hashes: [0; UI_MAX_ROWS],
+        label_hashes: [0; UI_MAX_LABELS],
         bindings: [Binding {
             generation: 0,
             key: 0,
@@ -58,7 +65,10 @@ const fn empty_backend() -> PageBackend {
         row_count: 0,
         label_count: 0,
         rendered_generation: 0,
+        layout_hash: 0,
+        layout_count: 0,
         page_index: 0,
+        layout_valid: false,
         active: false,
         interactive: false,
         refresh_failed: false,
@@ -251,6 +261,46 @@ extern "C" fn page_title_back(event: *mut core::ffi::c_void) {
 // Snapshot render
 // ---------------------------------------------------------------------------
 
+fn hash_word(mut hash: u32, value: u32) -> u32 {
+    for byte in value.to_le_bytes() {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+fn hash_text(mut hash: u32, text: &str) -> u32 {
+    for byte in text.as_bytes() {
+        hash = (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193);
+    }
+    hash_word(hash, text.len() as u32)
+}
+
+fn layout_fingerprint(snapshot: &Snapshot) -> (u32, u32) {
+    let mut hash = 0x811C_9DC5u32;
+    let mut count = 0u32;
+    for index in 0..snapshot.node_count as usize {
+        let node = &snapshot.nodes[index];
+        let marker = match node.kind() {
+            Some(NodeKind::Text) => 1,
+            Some(NodeKind::StatusRow) => 2,
+            Some(NodeKind::Button) => 3,
+            Some(NodeKind::ActionRow) => 4,
+            Some(NodeKind::SwitchRow) => 5,
+            _ => continue,
+        };
+        hash = hash_word(hash, marker);
+        hash = hash_word(hash, node.key);
+        count += 1;
+    }
+    (hash, count)
+}
+
+fn row_content_hash(primary: &str, secondary: &str, selected: u32) -> u32 {
+    let hash = hash_text(0x811C_9DC5, primary);
+    let hash = hash_text(hash, secondary);
+    hash_word(hash, selected)
+}
+
 fn target_row_kind(kind: NodeKind) -> u8 {
     match kind {
         NodeKind::SwitchRow => ROW_SWITCH,
@@ -341,6 +391,10 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
         return -1;
     }
 
+    let (next_layout_hash, next_layout_count) = layout_fingerprint(snapshot);
+    let layout_changed = !backend.layout_valid
+        || backend.layout_hash != next_layout_hash
+        || backend.layout_count != next_layout_count;
     let mut used_mask = 0u32;
     let mut label_used = 0u32;
     let mut previous: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -395,7 +449,8 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
         }
         if kind == NodeKind::Text {
             let mut object = backend.labels[label_used as usize];
-            if object.is_null() {
+            let created_now = object.is_null();
+            if created_now {
                 let created = unsafe { lvx_label_create(backend.content_root) };
                 if created.is_null() {
                     return -1;
@@ -404,22 +459,31 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
                 backend.label_count += 1;
                 object = created;
             }
-            unsafe { lvx_label_set_text(object, primary.as_ptr()) };
-            if snapshot.styles[index].text_style == TextStyle::Title as u16 {
-                unsafe {
-                    lvx_style_apply(
-                        object,
-                        STYLE_MISANS_DEMIBOLD_32 as *const core::ffi::c_void,
-                        255,
-                        0,
-                    );
+            let label_hash = hash_word(
+                hash_text(0x811C_9DC5, primary),
+                snapshot.styles[index].text_style as u32,
+            );
+            if created_now || backend.label_hashes[label_used as usize] != label_hash {
+                unsafe { lvx_label_set_text(object, primary.as_ptr()) };
+                if snapshot.styles[index].text_style == TextStyle::Title as u16 {
+                    unsafe {
+                        lvx_style_apply(
+                            object,
+                            STYLE_MISANS_DEMIBOLD_32 as *const core::ffi::c_void,
+                            255,
+                            0,
+                        );
+                    }
                 }
+                backend.label_hashes[label_used as usize] = label_hash;
             }
             unsafe { lvx_set_hidden(object, 0) };
-            if previous.is_null() {
-                unsafe { lvx_align_to(object, backend.content_root, ALIGN_TOP_MID, 0, 0) };
-            } else {
-                unsafe { lvx_align_to(object, previous, ALIGN_OUT_BOTTOM_MID, 0, 4) };
+            if layout_changed {
+                if previous.is_null() {
+                    unsafe { lvx_align_to(object, backend.content_root, ALIGN_TOP_MID, 0, 0) };
+                } else {
+                    unsafe { lvx_align_to(object, previous, ALIGN_OUT_BOTTOM_MID, 0, 4) };
+                }
             }
             previous = object;
             label_used += 1;
@@ -435,8 +499,13 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
         // The firmware tests only whether the secondary pointer is NULL. Rust's
         // empty `str` may use the non-dereferenceable dangling sentinel address
         // 1, so pass an actual resident NUL byte for rows without detail text.
+        let secondary_text = if node.secondary_len != 0 {
+            snapshot.secondary(node)
+        } else {
+            ""
+        };
         let secondary = if node.secondary_len != 0 {
-            snapshot.secondary(node).as_ptr()
+            secondary_text.as_ptr()
         } else {
             EMPTY_TEXT.as_ptr()
         };
@@ -451,7 +520,8 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             None => return -1,
         };
         let mut object = backend.rows[slot];
-        if object.is_null() {
+        let created_now = object.is_null();
+        if created_now {
             let created = unsafe {
                 lvx_list_row_create(backend.content_root, primary.as_ptr(), secondary, trailing)
             };
@@ -484,26 +554,32 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             }
             backend.row_count += 1;
         }
-        let selected = if row_kind == ROW_SWITCH {
+        let selected: u8 = if row_kind == ROW_SWITCH {
             if node.checked() { 1 } else { 0 }
         } else {
             1
         };
-        unsafe {
-            lvx_list_row_update(
-                object,
-                core::ptr::null(),
-                primary.as_ptr(),
-                secondary,
-                0,
-                selected,
-            );
-            lvx_set_hidden(object, 0);
+        let content_hash = row_content_hash(primary, secondary_text, u32::from(selected));
+        if created_now || backend.row_hashes[slot] != content_hash {
+            unsafe {
+                lvx_list_row_update(
+                    object,
+                    core::ptr::null(),
+                    primary.as_ptr(),
+                    secondary,
+                    0,
+                    selected,
+                );
+            }
+            backend.row_hashes[slot] = content_hash;
         }
-        if previous.is_null() {
-            unsafe { lvx_align_to(object, backend.content_root, ALIGN_TOP_MID, 0, 0) };
-        } else {
-            unsafe { lvx_align_to(object, previous, ALIGN_OUT_BOTTOM_MID, 0, ROW_GAP) };
+        unsafe { lvx_set_hidden(object, 0) };
+        if layout_changed {
+            if previous.is_null() {
+                unsafe { lvx_align_to(object, backend.content_root, ALIGN_TOP_MID, 0, 0) };
+            } else {
+                unsafe { lvx_align_to(object, previous, ALIGN_OUT_BOTTOM_MID, 0, ROW_GAP) };
+            }
         }
         previous = object;
         backend.row_keys[slot] = node.key;
@@ -530,6 +606,9 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             unsafe { lvx_set_hidden(backend.labels[i], 1) };
         }
     }
+    backend.layout_hash = next_layout_hash;
+    backend.layout_count = next_layout_count;
+    backend.layout_valid = true;
     backend.rendered_generation = snapshot.generation;
     backend.refresh_failed = false;
     0
