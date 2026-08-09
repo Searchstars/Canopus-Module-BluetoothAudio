@@ -78,6 +78,15 @@ pub struct LinkDetails {
     pub bitpool: u8,
     pub packets_sent: u32,
     pub frames_sent: u32,
+    pub audio_state: u8,
+    pub audio_stage: u8,
+    pub decoded_channels: u8,
+    pub decoded_sample_rate: u32,
+    pub input_used: u32,
+    pub pcm_frames: u32,
+    pub audio_rtp_packets: u32,
+    pub underruns: u32,
+    pub audio_error: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

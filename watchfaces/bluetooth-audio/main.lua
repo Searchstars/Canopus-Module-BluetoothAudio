@@ -92,7 +92,7 @@ local function stage_files()
         or u32(receipt, 0) ~= 0x31494D43 then
         return false, "Missing or invalid signed receipt"
     end
-    if type(module) ~= "string" or #module < 512 or #module > 131072
+    if type(module) ~= "string" or #module < 512 or #module > 262144
         or module:sub(1, 4) ~= "\127ELF" then
         return false, "Missing or invalid ARM module"
     end

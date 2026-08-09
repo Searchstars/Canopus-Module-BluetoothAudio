@@ -11,7 +11,7 @@ use canopus_bluetooth_audio_core::{
         FORMAT_MP3, FormatV1, STATE_BUFFERING, STATE_DRAINING, STATE_PAUSED, STATE_PLAYING,
     },
     media::{FRAME_SAMPLES, StreamPacketizer},
-    mp3::{Mp3ByteStream, StreamProgress},
+    mp3::{MIN_DECODE_INPUT, Mp3ByteStream, StreamProgress},
 };
 use canopus_target_private::*;
 
@@ -37,9 +37,24 @@ const WORK_FLUSH: u8 = 7;
 const WORK_CLOSE: u8 = 8;
 const WORK_TEST_PREPARE: u8 = 9;
 const INGEST_CHUNK: usize = 512;
+const LONG_TEST_PREBUFFER: usize = MIN_DECODE_INPUT;
+const LONG_TEST_REFILL_LOW_WATER: usize = MIN_DECODE_INPUT;
+const LONG_TEST_REFILL_TARGET: usize = 4 * 1024;
 const PCM_FRAME_CAPACITY: usize = 1152 + FRAME_SAMPLES as usize - 1;
 const PCM_SAMPLES: usize = 2 * PCM_FRAME_CAPACITY;
 const LONG_TEST_AUDIO_PATH: &[u8] = b"/data/canopus/tmp_btaudio_module_long_audio_test.mp3\0";
+
+pub const AUDIO_STAGE_IDLE: u32 = 0;
+pub const AUDIO_STAGE_QUEUED: u32 = 1;
+pub const AUDIO_STAGE_PREBUFFER: u32 = 2;
+pub const AUDIO_STAGE_AVDTP_START: u32 = 3;
+pub const AUDIO_STAGE_DECODE: u32 = 4;
+pub const AUDIO_STAGE_PCM_READY: u32 = 5;
+pub const AUDIO_STAGE_SBC: u32 = 6;
+pub const AUDIO_STAGE_RTP: u32 = 7;
+pub const AUDIO_STAGE_DRAINING: u32 = 8;
+pub const AUDIO_STAGE_COMPLETE: u32 = 9;
+pub const AUDIO_STAGE_FAILED: u32 = 10;
 
 #[repr(C)]
 struct WorkToken {
@@ -53,6 +68,7 @@ struct TimerToken {
     runtime_generation: u32,
     audio_generation: u32,
     timer_generation: u32,
+    handle: AtomicU32,
 }
 
 struct Pipeline {
@@ -66,6 +82,7 @@ struct Pipeline {
     packetizer: MaybeUninit<StreamPacketizer>,
     packetizer_ready: bool,
     session_generation: u32,
+    next_packet_deadline_ms: u64,
     marker: bool,
 }
 
@@ -73,8 +90,26 @@ static PIPELINE: AtomicUsize = AtomicUsize::new(0);
 static WAKE_QUEUED: AtomicBool = AtomicBool::new(false);
 static WAKE_RUNTIME_GENERATION: AtomicU32 = AtomicU32::new(0);
 static WAKE_AUDIO_GENERATION: AtomicU32 = AtomicU32::new(0);
+static AUDIO_STAGE: AtomicU32 = AtomicU32::new(AUDIO_STAGE_IDLE);
 static LONG_TEST_FD: AtomicI32 = AtomicI32::new(-1);
 static LONG_TEST_OWNS_INPUT: AtomicBool = AtomicBool::new(false);
+
+pub fn diagnostic_stage() -> u32 {
+    AUDIO_STAGE.load(Ordering::Acquire)
+}
+
+fn monotonic_ms() -> Option<u64> {
+    let mut value = stock_timespec_t {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let result =
+        unsafe { canopus_fw_clock_gettime(1, core::ptr::addr_of_mut!(value).cast_const()) };
+    if result != 0 || value.tv_sec < 0 || !(0..1_000_000_000).contains(&value.tv_nsec) {
+        return None;
+    }
+    Some(value.tv_sec as u64 * 1_000 + value.tv_nsec as u64 / 1_000_000)
+}
 
 fn pipeline() -> Option<&'static mut Pipeline> {
     let pointer = PIPELINE.load(Ordering::Acquire) as *mut Pipeline;
@@ -131,6 +166,7 @@ impl Pipeline {
         self.packetizer.write(packetizer);
         self.packetizer_ready = true;
         self.session_generation = generation;
+        self.next_packet_deadline_ms = 0;
         self.marker = true;
         Ok(())
     }
@@ -142,6 +178,7 @@ impl Pipeline {
         self.pcm_offset = 0;
         self.packetizer_ready = false;
         self.session_generation = generation;
+        self.next_packet_deadline_ms = 0;
         self.marker = true;
     }
 
@@ -163,6 +200,25 @@ impl Pipeline {
         }
         // SAFETY: encoder_ready tracks initialization of this field.
         Ok(unsafe { self.encoder.assume_init_mut() })
+    }
+
+    fn next_packet_delay(&mut self, frames: u8) -> Result<u32, i32> {
+        let interval = self.packetizer()?.next_delay_ms(frames);
+        let Some(now) = monotonic_ms() else {
+            return Ok(interval);
+        };
+        let base = if self.next_packet_deadline_ms == 0
+            || now.saturating_sub(self.next_packet_deadline_ms) > 50
+        {
+            now
+        } else {
+            self.next_packet_deadline_ms
+        };
+        self.next_packet_deadline_ms = base + u64::from(interval);
+        Ok(self
+            .next_packet_deadline_ms
+            .saturating_sub(now)
+            .clamp(1, u64::from(u32::MAX)) as u32)
     }
 }
 
@@ -201,19 +257,27 @@ fn queue(command: u8) -> Result<(), i32> {
 }
 
 pub fn schedule_start() -> Result<(), i32> {
-    queue(WORK_START)
+    AUDIO_STAGE.store(AUDIO_STAGE_AVDTP_START, Ordering::Release);
+    if let Err(error) = queue(WORK_START) {
+        AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn schedule_wake() -> Result<(), i32> {
+    let r = runtime();
+    // Refresh the generation even when a wake is already queued. Otherwise a
+    // write after STOP/FLUSH can be hidden behind stale queued work: the stale
+    // callback clears WAKE_QUEUED and exits, leaving the new ring data asleep.
+    WAKE_RUNTIME_GENERATION.store(r.generation, Ordering::Release);
+    WAKE_AUDIO_GENERATION.store(audio_device::input().generation(), Ordering::Release);
     if WAKE_QUEUED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return Ok(());
     }
-    let r = runtime();
-    WAKE_RUNTIME_GENERATION.store(r.generation, Ordering::Release);
-    WAKE_AUDIO_GENERATION.store(audio_device::input().generation(), Ordering::Release);
     let owner = unsafe { bt_l2cap_owner() };
     let queued = if owner.is_null() {
         core::ptr::null_mut()
@@ -248,7 +312,12 @@ pub fn schedule_stop() -> Result<(), i32> {
 }
 
 pub fn schedule_drain() -> Result<(), i32> {
-    queue(WORK_DRAIN)
+    AUDIO_STAGE.store(AUDIO_STAGE_DRAINING, Ordering::Release);
+    if let Err(error) = queue(WORK_DRAIN) {
+        AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn schedule_flush() -> Result<(), i32> {
@@ -280,7 +349,9 @@ pub fn start_long_test() -> Result<(), i32> {
         return Err(error.errno());
     }
     LONG_TEST_OWNS_INPUT.store(true, Ordering::Release);
+    AUDIO_STAGE.store(AUDIO_STAGE_QUEUED, Ordering::Release);
     if let Err(error) = queue(WORK_TEST_PREPARE) {
+        AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
         release_long_test_input();
         return Err(error);
     }
@@ -298,6 +369,7 @@ fn release_long_test_input() {
 }
 
 fn prepare_long_test() -> i32 {
+    AUDIO_STAGE.store(AUDIO_STAGE_PREBUFFER, Ordering::Release);
     if !LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
         return 0;
     }
@@ -309,8 +381,11 @@ fn prepare_long_test() -> i32 {
     let mut scratch = [0u8; INGEST_CHUNK];
     let input = audio_device::input();
     let mut buffered = 0usize;
-    while buffered < 4096 {
-        let count = scratch.len().min(input.ring.free());
+    while buffered < LONG_TEST_PREBUFFER {
+        let count = scratch
+            .len()
+            .min(input.ring.free())
+            .min(LONG_TEST_PREBUFFER - buffered);
         if count == 0 {
             break;
         }
@@ -339,6 +414,7 @@ fn prepare_long_test() -> i32 {
 fn refill_long_test(
     input: &canopus_bluetooth_audio_core::audio_input::AudioInput<{ audio_device::INPUT_CAPACITY }>,
     scratch: &mut [u8],
+    decoder_pending: usize,
 ) -> i32 {
     if !LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
         return 0;
@@ -347,9 +423,16 @@ fn refill_long_test(
     if fd < 0 {
         return 0;
     }
-    let mut total = 0usize;
-    while total < 4096 {
-        let count = scratch.len().min(input.ring.free());
+    let buffered = input.ring.used().saturating_add(decoder_pending);
+    if buffered >= LONG_TEST_REFILL_LOW_WATER {
+        return 0;
+    }
+    let mut total = buffered;
+    while total < LONG_TEST_REFILL_TARGET {
+        let count = scratch
+            .len()
+            .min(input.ring.free())
+            .min(LONG_TEST_REFILL_TARGET - total);
         if count == 0 {
             return 0;
         }
@@ -358,6 +441,7 @@ fn refill_long_test(
             return read;
         }
         if read == 0 {
+            AUDIO_STAGE.store(AUDIO_STAGE_DRAINING, Ordering::Release);
             let closed = LONG_TEST_FD.swap(-1, Ordering::AcqRel);
             if closed >= 0 {
                 unsafe { nuttx_close(closed) };
@@ -393,6 +477,7 @@ extern "C" fn audio_wake_work(_owner_valid: i32, event: i32, _argument: *mut c_v
     }
     let result = with_core(|core| dispatch(core, WORK_WAKE, generation));
     if result != 0 {
+        AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
         audio_device::input().fail(generation, result);
         r.last_error.store(result, Ordering::Release);
         transport::audio_failed(generation);
@@ -419,6 +504,7 @@ extern "C" fn audio_work(_owner_valid: i32, event: i32, argument: *mut c_void) -
     }
     let result = with_core(|core| dispatch(core, token.command as u8, token.audio_generation));
     if result != 0 {
+        AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
         input.fail(token.audio_generation, result);
         r.last_error.store(result, Ordering::Release);
         transport::audio_failed(token.audio_generation);
@@ -465,11 +551,15 @@ fn dispatch(core: &mut Core, command: u8, generation: u32) -> i32 {
             }
         }
         WORK_STOP | WORK_FLUSH | WORK_CLOSE => {
+            AUDIO_STAGE.store(AUDIO_STAGE_IDLE, Ordering::Release);
             cancel_timer();
             if let Some(pipeline) = pipeline() {
                 pipeline.reset(generation);
             }
             transport::complete_audio(core);
+            if LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
+                release_long_test_input();
+            }
             0
         }
         WORK_DRAIN => pump(core, generation),
@@ -493,6 +583,7 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
         runtime()
             .media_state
             .store(MEDIA_STREAMING, Ordering::Release);
+        AUDIO_STAGE.store(AUDIO_STAGE_DECODE, Ordering::Release);
         return pump(core, generation);
     }
     let sbc = &core.source.selected_sbc;
@@ -513,6 +604,7 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
     runtime()
         .media_state
         .store(MEDIA_STREAMING, Ordering::Release);
+    AUDIO_STAGE.store(AUDIO_STAGE_DECODE, Ordering::Release);
     pump(core, generation)
 }
 
@@ -535,7 +627,8 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
         Some(pipeline) if pipeline.session_generation == generation => pipeline,
         _ => return 0,
     };
-    let refill = refill_long_test(input, &mut pipeline.ingest);
+    let decoder_pending = pipeline.stream.pending();
+    let refill = refill_long_test(input, &mut pipeline.ingest, decoder_pending);
     if refill != 0 {
         return refill;
     }
@@ -584,6 +677,7 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
                     return ERR_AUDIO_DECODE;
                 }
                 pipeline.pcm_frames = carry + frames;
+                AUDIO_STAGE.store(AUDIO_STAGE_PCM_READY, Ordering::Release);
                 input.add_pcm_frames(generation, frames as u32);
                 let bitpool = match pipeline.packetizer() {
                     Ok(packetizer) => packetizer.bitpool as u32,
@@ -599,6 +693,7 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
             Ok(StreamProgress::NeedInput) if end_of_input => {
                 pipeline.stream.discard_incomplete();
                 input.mark_drained(generation, true);
+                AUDIO_STAGE.store(AUDIO_STAGE_COMPLETE, Ordering::Release);
                 transport::complete_audio(core);
                 if LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
                     release_long_test_input();
@@ -645,6 +740,7 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
     };
     pipeline.marker = false;
 
+    AUDIO_STAGE.store(AUDIO_STAGE_SBC, Ordering::Release);
     for frame_index in 0..packet_frames as usize {
         let pcm_begin = (pipeline.pcm_offset + frame_index * FRAME_SAMPLES as usize) * 2;
         let pcm_end = pcm_begin + FRAME_SAMPLES as usize * 2;
@@ -674,10 +770,11 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
     if send != 0 {
         return send;
     }
+    AUDIO_STAGE.store(AUDIO_STAGE_RTP, Ordering::Release);
     pipeline.pcm_offset += packet_frames as usize * FRAME_SAMPLES as usize;
     input.add_rtp_packets(generation, 1);
-    let delay = match pipeline.packetizer() {
-        Ok(packetizer) => packetizer.next_delay_ms(packet_frames),
+    let delay = match pipeline.next_packet_delay(packet_frames) {
+        Ok(delay) => delay,
         Err(error) => return error,
     };
     schedule_timer(delay, generation)
@@ -696,11 +793,13 @@ fn schedule_timer(delay_ms: u32, audio_generation: u32) -> i32 {
     if token.is_null() {
         return ERR_MEDIA_ALLOC;
     }
+    let timer_generation = r.audio_timer_generation.load(Ordering::Acquire);
     unsafe {
         token.write(TimerToken {
             runtime_generation: r.generation,
             audio_generation,
-            timer_generation: r.audio_timer_generation.load(Ordering::Acquire),
+            timer_generation,
+            handle: AtomicU32::new(0),
         });
     }
     let handle = unsafe {
@@ -718,7 +817,26 @@ fn schedule_timer(delay_ms: u32, audio_generation: u32) -> i32 {
         unsafe { bt_free(token.cast()) };
         return ERR_AUDIO_QUEUE;
     }
-    r.audio_timer_handle.store(handle, Ordering::Release);
+    // The firmware does not dispatch a positive-delay timer before bt_timer_add
+    // returns. Publish its identity in the token before publishing the shared
+    // handle so a stale callback can only clear its own timer.
+    unsafe { (*token).handle.store(handle, Ordering::Release) };
+    if r.audio_timer_handle
+        .compare_exchange(0, handle, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let mut duplicate = handle;
+        unsafe { bt_timer_cancel(&mut duplicate) };
+        return ERR_MEDIA_STATE;
+    }
+    if r.audio_timer_generation.load(Ordering::Acquire) != timer_generation
+        && r.audio_timer_handle
+            .compare_exchange(handle, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let mut stale = handle;
+        unsafe { bt_timer_cancel(&mut stale) };
+    }
     0
 }
 
@@ -747,12 +865,21 @@ fn audio_timer_callback_impl(
         return 0;
     }
     if token.audio_generation != audio_device::input().generation() {
-        r.audio_timer_handle.store(0, Ordering::Release);
+        let handle = token.handle.load(Ordering::Acquire);
+        let _ =
+            r.audio_timer_handle
+                .compare_exchange(handle, 0, Ordering::AcqRel, Ordering::Acquire);
         unsafe { bt_free(argument) };
         return 0;
     }
     let dispatch = |core: &mut Core| {
-        r.audio_timer_handle.store(0, Ordering::Release);
+        let handle = token.handle.load(Ordering::Acquire);
+        if r.audio_timer_handle
+            .compare_exchange(handle, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return 0;
+        }
         if owner_valid == 0 || event != AUDIO_TIMER_EVENT as i32 {
             ERR_AUDIO_QUEUE
         } else {
@@ -768,6 +895,7 @@ fn audio_timer_callback_impl(
         let generation = token.audio_generation;
         unsafe { bt_free(argument) };
         if result != 0 {
+            AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
             audio_device::input().fail(generation, result);
             r.last_error.store(result, Ordering::Release);
             transport::audio_failed(generation);
@@ -784,6 +912,7 @@ fn audio_timer_callback_impl(
     }
     let generation = token.audio_generation;
     unsafe { bt_free(argument) };
+    AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
     audio_device::input().fail(generation, ERR_AUDIO_QUEUE);
     r.last_error.store(ERR_AUDIO_QUEUE, Ordering::Release);
     transport::audio_failed(generation);
@@ -794,6 +923,7 @@ fn audio_timer_callback_impl(
 }
 
 pub fn transport_lost(error: i32) {
+    AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
     cancel_timer();
     let input = audio_device::input();
     let state = input.state();

@@ -183,6 +183,43 @@ fn sync_target_model(core: &mut Core) {
         details.pairing_flags = pairing_flags;
         changed = true;
     }
+    let audio = audio_device::input().status();
+    let audio_stage = audio_stream::diagnostic_stage() as u8;
+    let bitpool = if audio.negotiated_bitpool != 0 {
+        audio.negotiated_bitpool as u8
+    } else {
+        details.bitpool
+    };
+    let audio_error = if audio.last_error != 0 {
+        audio.last_error
+    } else if audio_stage == audio_stream::AUDIO_STAGE_FAILED as u8 {
+        error
+    } else {
+        0
+    };
+    if details.bitpool != bitpool
+        || details.audio_state != audio.state as u8
+        || details.audio_stage != audio_stage
+        || details.decoded_channels != audio.decoded_channels as u8
+        || details.decoded_sample_rate != audio.decoded_sample_rate
+        || details.input_used != audio.input_used
+        || details.pcm_frames != audio.pcm_frames
+        || details.audio_rtp_packets != audio.rtp_packets
+        || details.underruns != audio.underruns
+        || details.audio_error != audio_error
+    {
+        details.bitpool = bitpool;
+        details.audio_state = audio.state as u8;
+        details.audio_stage = audio_stage;
+        details.decoded_channels = audio.decoded_channels as u8;
+        details.decoded_sample_rate = audio.decoded_sample_rate;
+        details.input_used = audio.input_used;
+        details.pcm_frames = audio.pcm_frames;
+        details.audio_rtp_packets = audio.rtp_packets;
+        details.underruns = audio.underruns;
+        details.audio_error = audio_error;
+        changed = true;
+    }
     if changed {
         core.controller.model.touch();
     }
@@ -316,15 +353,20 @@ fn handle_action(page_index: usize, event_id: u32) {
         with_core(|core| {
             if core.controller.model.connection == ConnectionState::Ready
                 && core.controller.model.stream == StreamState::Open
-                && transport::play_tone(core).is_ok()
             {
-                core.controller.model.stream =
-                    if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
-                        StreamState::Streaming
-                    } else {
-                        StreamState::Starting
-                    };
-                core.controller.model.touch();
+                match transport::play_tone(core) {
+                    Ok(()) => {
+                        runtime().last_error.store(0, Ordering::Release);
+                        core.controller.model.stream =
+                            if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
+                                StreamState::Streaming
+                            } else {
+                                StreamState::Starting
+                            };
+                        core.controller.model.touch();
+                    }
+                    Err(error) => runtime().last_error.store(error, Ordering::Release),
+                }
             }
         });
         rebuild(page_index);
@@ -334,10 +376,15 @@ fn handle_action(page_index: usize, event_id: u32) {
         with_core(|core| {
             if core.controller.model.connection == ConnectionState::Ready
                 && core.controller.model.stream == StreamState::Open
-                && audio_stream::start_long_test().is_ok()
             {
-                core.controller.model.stream = StreamState::Starting;
-                core.controller.model.touch();
+                match audio_stream::start_long_test() {
+                    Ok(()) => {
+                        runtime().last_error.store(0, Ordering::Release);
+                        core.controller.model.stream = StreamState::Starting;
+                        core.controller.model.touch();
+                    }
+                    Err(error) => runtime().last_error.store(error, Ordering::Release),
+                }
             }
         });
         rebuild(page_index);

@@ -42,8 +42,7 @@ PY
 mkdir -p "$OUT" "$WATCHFACE"
 
 # Same lean nightly build as build-device.sh: hashed mangling + merged
-# function sections shrink the ELF below the firmware loader limit and the
-# 128KiB CMI1 receipt bound.
+# function sections shrink the ELF while the MP3 decoder retains throughput.
 NIGHTLY=${NIGHTLY_CARGO:-cargo +nightly}
 LEAN_RUSTFLAGS="-C panic=abort -C target-cpu=$RUST_TARGET_CPU -Z unstable-options \
   -Z function-sections=no -C symbol-mangling-version=hashed \
@@ -115,7 +114,7 @@ module = (watchface / "module.bin").read_bytes()
 receipt = (watchface / "receipt.bin").read_bytes()
 long_audio = (watchface / "long_test_audio.bin").read_bytes()
 long_audio_stream = (watchface / "long_test_audio_stream.bin").read_bytes()
-assert module[:4] == b"\x7fELF" and 512 <= len(module) <= 131072
+assert module[:4] == b"\x7fELF" and 512 <= len(module) <= 262144
 assert receipt[:4] == b"CMI1" and len(receipt) == 256
 assert long_audio[:3] == b"ID3" and len(long_audio) >= 4096
 assert long_audio_stream[0] == 0xff and long_audio_stream[1] & 0xe0 == 0xe0

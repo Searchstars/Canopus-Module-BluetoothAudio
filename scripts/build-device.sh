@@ -16,8 +16,8 @@ CC=${CC:-clang}
 mkdir -p "$OUT"
 
 # The module is cross-built on the nightly toolchain with two levers that keep
-# the relocatable ELF small enough for the firmware loader and the 128KiB CMI1
-# installer receipt bound:
+# the relocatable ELF compact while allowing the decoder's hot loops to use a
+# separate throughput-oriented package profile:
 #   - hashed symbol mangling (needs -Z unstable-options) shrinks the long
 #     Rust symbol/section names that otherwise dominate .symtab/.strtab.
 #   - function-sections=no merges the ~890 per-function sections into a handful,

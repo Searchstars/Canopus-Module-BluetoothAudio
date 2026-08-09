@@ -117,8 +117,18 @@ impl<const N: usize> InputRing<N> {
             // SAFETY: the producer owns all slots from head up to tail+N.
             unsafe { (*self.bytes.get())[index] = byte };
         }
-        self.head
-            .store(head.wrapping_add(count as u32), Ordering::Release);
+        if self
+            .head
+            .compare_exchange(
+                head,
+                head.wrapping_add(count as u32),
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return 0;
+        }
         count
     }
 
@@ -134,15 +144,30 @@ impl<const N: usize> InputRing<N> {
             // SAFETY: the consumer owns all published slots before head.
             *byte = unsafe { (*self.bytes.get())[index] };
         }
-        self.tail
-            .store(tail.wrapping_add(count as u32), Ordering::Release);
+        if self
+            .tail
+            .compare_exchange(
+                tail,
+                tail.wrapping_add(count as u32),
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return 0;
+        }
         count
     }
 
-    /// Discards all published bytes. Call only after the session generation has
-    /// invalidated producer/consumer work.
+    /// Discards all published bytes and invalidates an in-flight producer or
+    /// consumer commit. Advancing both monotonic cursors by one capacity keeps
+    /// their physical ring indices unchanged while making stale CAS commits
+    /// fail instead of resurrecting data from the previous session.
     pub fn reset(&self) {
-        let head = self.head.load(Ordering::Acquire);
+        let head = self
+            .head
+            .fetch_add(N as u32, Ordering::AcqRel)
+            .wrapping_add(N as u32);
         self.tail.store(head, Ordering::Release);
     }
 }
@@ -349,6 +374,7 @@ impl<const N: usize> AudioInput<N> {
         if !self.opened.load(Ordering::Acquire) || self.format.load(Ordering::Acquire) == 0 {
             return Err(InputError::Pipe);
         }
+        let generation = self.generation();
         let state = self.state.load(Ordering::Acquire);
         if state == STATE_DRAINING || state == STATE_CLOSED || state == STATE_IDLE {
             return Err(InputError::Pipe);
@@ -357,6 +383,10 @@ impl<const N: usize> AudioInput<N> {
             return Err(InputError::Io);
         }
         let count = self.ring.write(input);
+        if self.generation() != generation {
+            self.ring.reset();
+            return Err(InputError::Pipe);
+        }
         if count == 0 && !input.is_empty() {
             return Err(InputError::Again);
         }

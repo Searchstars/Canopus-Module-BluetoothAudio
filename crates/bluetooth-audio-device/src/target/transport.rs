@@ -24,6 +24,13 @@ use super::{audio_device, audio_stream, bluetooth};
 const MEDIA_TIMER_EVENT: u8 = 9;
 const MEDIA_TIMER_TAG: &[u8] = b"A2DPM\0";
 
+#[repr(C)]
+struct MediaRetryToken {
+    generation: u32,
+    event: u32,
+    argument: *mut core::ffi::c_void,
+}
+
 // ---------------------------------------------------------------------------
 // SDP registration
 // ---------------------------------------------------------------------------
@@ -674,27 +681,86 @@ fn media_submit_connect() -> i32 {
 }
 
 extern "C" fn media_l2cap_callback_even(event: u32, argument: *mut core::ffi::c_void) -> i32 {
-    media_l2cap_callback_impl(event, argument, 0, false)
+    media_l2cap_callback_impl(event, argument, 0, false, None)
 }
 
 extern "C" fn media_l2cap_callback_odd(event: u32, argument: *mut core::ffi::c_void) -> i32 {
-    media_l2cap_callback_impl(event, argument, 1, false)
+    media_l2cap_callback_impl(event, argument, 1, false, None)
 }
 
-extern "C" fn media_retry_even(
+extern "C" fn media_retry_cancel(
+    _owner_valid: i32,
+    _event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    if !argument.is_null() {
+        let token = unsafe { &*argument.cast::<MediaRetryToken>() };
+        if !token.argument.is_null() {
+            unsafe { bt_free(token.argument) };
+        }
+        unsafe { bt_free(argument) };
+    }
+    0
+}
+
+extern "C" fn media_retry_work(
     _owner_valid: i32,
     event: i32,
     argument: *mut core::ffi::c_void,
 ) -> i32 {
-    media_l2cap_callback_impl(event as u32, argument, 0, true)
+    if argument.is_null() {
+        return 0;
+    }
+    let token = unsafe { argument.cast::<MediaRetryToken>().read() };
+    unsafe { bt_free(argument) };
+    if event != token.event as i32 {
+        unsafe { bt_free(token.argument) };
+        return 0;
+    }
+    media_l2cap_callback_impl(
+        token.event,
+        token.argument,
+        token.generation & 1,
+        true,
+        Some(token.generation),
+    )
 }
 
-extern "C" fn media_retry_odd(
-    _owner_valid: i32,
-    event: i32,
-    argument: *mut core::ffi::c_void,
-) -> i32 {
-    media_l2cap_callback_impl(event as u32, argument, 1, true)
+fn queue_media_retry(event: u32, argument: *mut core::ffi::c_void, generation: u32) -> bool {
+    if event > u8::MAX as u32 {
+        return false;
+    }
+    let token =
+        unsafe { bt_alloc(core::mem::size_of::<MediaRetryToken>() as u32) } as *mut MediaRetryToken;
+    if token.is_null() {
+        return false;
+    }
+    unsafe {
+        token.write(MediaRetryToken {
+            generation,
+            event,
+            argument,
+        });
+    }
+    let owner = unsafe { bt_l2cap_owner() };
+    let queued = if owner.is_null() {
+        core::ptr::null_mut()
+    } else {
+        unsafe {
+            bt_queue_external(
+                owner,
+                media_retry_work,
+                media_retry_cancel as *const () as *mut core::ffi::c_void,
+                token.cast(),
+                event as u8,
+            )
+        }
+    };
+    if queued.is_null() {
+        unsafe { bt_free(token.cast()) };
+        return false;
+    }
+    true
 }
 
 fn media_l2cap_callback_impl(
@@ -702,12 +768,16 @@ fn media_l2cap_callback_impl(
     argument: *mut core::ffi::c_void,
     generation_parity: u32,
     blocking: bool,
+    exact_generation: Option<u32>,
 ) -> i32 {
     let r = runtime();
     if argument.is_null() {
         return 0;
     }
-    if r.media_generation.load(Ordering::Acquire) & 1 != generation_parity {
+    let media_generation = r.media_generation.load(Ordering::Acquire);
+    if media_generation & 1 != generation_parity
+        || exact_generation.is_some_and(|generation| generation != media_generation)
+    {
         unsafe { bt_free(argument) };
         return 0;
     }
@@ -810,12 +880,7 @@ fn media_l2cap_callback_impl(
         unsafe { bt_free(argument) };
         return 0;
     }
-    let retry = if generation_parity == 0 {
-        media_retry_even
-    } else {
-        media_retry_odd
-    };
-    if event <= u8::MAX as u32 && queue_owned_callback(retry, event as u8, argument) {
+    if queue_media_retry(event, argument, media_generation) {
         return 0;
     }
     r.last_error.store(ERRNO_EBUSY, Ordering::Release);
@@ -882,7 +947,13 @@ pub fn start_audio(core: &mut Core, generation: u32) -> Result<(), i32> {
         {
             r.media_state.store(MEDIA_STREAMING, Ordering::Release);
             let result = audio_stream::begin(core, generation);
-            if result == 0 { Ok(()) } else { Err(result) }
+            if result == 0 {
+                core.controller.model.stream = StreamState::Streaming;
+                core.controller.model.touch();
+                Ok(())
+            } else {
+                Err(result)
+            }
         }
         MEDIA_IDLE => {
             r.media_flags
@@ -931,7 +1002,10 @@ pub fn audio_failed(_generation: u32) {
         !(MEDIA_FLAG_EXTERNAL_STREAM | MEDIA_FLAG_START_WHEN_CONNECTED),
         Ordering::AcqRel,
     );
-    if r.media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
+    if matches!(
+        r.media_state.load(Ordering::Acquire),
+        MEDIA_STARTING | MEDIA_STREAMING
+    ) {
         r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
     }
     with_core(|core| {
@@ -1044,7 +1118,7 @@ fn media_begin_tone(core: &mut Core) -> i32 {
         .as_ref()
         .map(|packetizer| packetizer.startup_packets(core.source.reported_delay_100us))
         .unwrap_or(1);
-    let result = {
+    let result = (|| {
         for _ in 0..startup_packets {
             let out = core.media_out.as_mut_slice();
             let packet_len = match core.packetizer.as_mut() {
@@ -1074,7 +1148,7 @@ fn media_begin_tone(core: &mut Core) -> i32 {
                 .unwrap_or(1);
             media_schedule_packet_after(delay_ms)
         }
-    };
+    })();
     if result != 0 {
         r.media_state.store(MEDIA_FAILED, Ordering::Release);
         r.last_error.store(result, Ordering::Release);
@@ -1139,10 +1213,11 @@ fn media_schedule_packet_after(delay_ms: u32) -> i32 {
     if token.is_null() {
         return ERR_MEDIA_ALLOC;
     }
+    let timer_generation = r.media_timer_generation.load(Ordering::Acquire);
     unsafe {
         token.write(MediaTimerToken {
             generation: r.generation,
-            timer_generation: r.media_timer_generation.load(Ordering::Acquire),
+            timer_generation,
         });
     }
     let handle = unsafe {
@@ -1160,7 +1235,22 @@ fn media_schedule_packet_after(delay_ms: u32) -> i32 {
         unsafe { bt_free(token as *mut core::ffi::c_void) };
         return ERR_MEDIA_TIMER;
     }
-    r.media_timer_handle.store(handle, Ordering::Release);
+    if r.media_timer_handle
+        .compare_exchange(0, handle, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let mut duplicate = handle;
+        unsafe { bt_timer_cancel(&mut duplicate) };
+        return ERR_MEDIA_STATE;
+    }
+    if r.media_timer_generation.load(Ordering::Acquire) != timer_generation
+        && r.media_timer_handle
+            .compare_exchange(handle, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let mut stale = handle;
+        unsafe { bt_timer_cancel(&mut stale) };
+    }
     0
 }
 

@@ -114,6 +114,38 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.status_row(32, "SBC bitpool", bitpool.as_str())?;
     let packets = unsigned(model.details.packets_sent);
     tree.status_row(33, "Packets", packets.as_str())?;
+    tree.status_row(
+        37,
+        "Pipeline",
+        audio_stage_detail(model.details.audio_stage),
+    )?;
+    let mut input = FixedText::<32>::default();
+    let _ = write!(
+        input,
+        "{} / {} B",
+        audio_state_detail(model.details.audio_state),
+        model.details.input_used
+    );
+    tree.status_row(38, "Input", input.as_str())?;
+    let mut decoded = FixedText::<32>::default();
+    if model.details.decoded_sample_rate == 0 {
+        let _ = decoded.write_str("Waiting for frame");
+    } else {
+        let _ = write!(
+            decoded,
+            "{} Hz / {} ch",
+            model.details.decoded_sample_rate, model.details.decoded_channels
+        );
+    }
+    tree.status_row(39, "MP3 decoded", decoded.as_str())?;
+    let pcm_frames = unsigned(model.details.pcm_frames);
+    tree.status_row(40, "PCM frames", pcm_frames.as_str())?;
+    let audio_packets = unsigned(model.details.audio_rtp_packets);
+    tree.status_row(41, "MP3 RTP", audio_packets.as_str())?;
+    let underruns = unsigned(model.details.underruns);
+    tree.status_row(42, "Underruns", underruns.as_str())?;
+    let audio_error = number(model.details.audio_error);
+    tree.status_row(43, "Audio error", audio_error.as_str())?;
     let can_play =
         model.connection == ConnectionState::Ready && model.stream == crate::StreamState::Open;
     tree.button(34, "Play test tone", EVENT_TEST_TONE, can_play)?;
@@ -195,6 +227,38 @@ fn stream_detail(state: crate::StreamState) -> &'static str {
         crate::StreamState::Streaming => "Playing audio",
         crate::StreamState::Suspending => "Stopping",
         crate::StreamState::Failed => "Failed",
+    }
+}
+
+fn audio_state_detail(state: u8) -> &'static str {
+    match state {
+        0 => "Closed",
+        1 => "Idle",
+        2 => "Configured",
+        3 => "Buffering",
+        4 => "Playing",
+        5 => "Paused",
+        6 => "Draining",
+        7 => "Stopped",
+        8 => "Error",
+        _ => "Unknown",
+    }
+}
+
+fn audio_stage_detail(stage: u8) -> &'static str {
+    match stage {
+        0 => "Idle",
+        1 => "Queued",
+        2 => "Prebuffering",
+        3 => "AVDTP START",
+        4 => "MP3 decode",
+        5 => "PCM ready",
+        6 => "SBC encode",
+        7 => "RTP sent",
+        8 => "Draining",
+        9 => "Complete",
+        10 => "Failed",
+        _ => "Unknown",
     }
 }
 

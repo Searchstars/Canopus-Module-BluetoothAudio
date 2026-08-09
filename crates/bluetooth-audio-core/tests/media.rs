@@ -69,24 +69,25 @@ fn derives_bounded_startup_prebuffer_from_sink_delay() {
 
 #[test]
 fn packetizes_variable_length_stream_packets() {
-    let mut p = StreamPacketizer::new(672, 39).unwrap();
+    let mut p = StreamPacketizer::new(2_820, 39).unwrap();
+    assert_eq!(p.frames_per_packet, 9);
     let mut packet = [0u8; MAX_PACKET];
-    let payload = p.write_header(&mut packet, 5, true).unwrap();
+    let payload = p.write_header(&mut packet, 9, true).unwrap();
     assert_eq!(payload, 13);
-    assert_eq!(p.packet_length(5).unwrap(), 13 + 5 * 90);
+    assert_eq!(p.packet_length(9).unwrap(), 13 + 9 * 90);
     assert_eq!(packet[1], 96 | 0x80);
-    assert_eq!(packet[12], 5);
+    assert_eq!(packet[12], 9);
     assert_eq!(p.sequence, 2);
-    assert_eq!(p.timestamp, 640);
-    assert!(matches!(p.next_delay_ms(5), 14 | 15));
+    assert_eq!(p.timestamp, 1_152);
+    assert!(matches!(p.next_delay_ms(9), 26 | 27));
 
     p.write_header(&mut packet, 2, false).unwrap();
     assert_eq!(packet[1], 96);
     assert_eq!(packet[12], 2);
-    assert_eq!(p.frames_sent, 7);
-    assert_eq!(p.timestamp, 896);
+    assert_eq!(p.frames_sent, 11);
+    assert_eq!(p.timestamp, 1_408);
     assert!(p.write_header(&mut packet, 0, false).is_err());
-    assert!(p.write_header(&mut packet, 6, false).is_err());
+    assert!(p.write_header(&mut packet, 10, false).is_err());
 }
 
 #[test]

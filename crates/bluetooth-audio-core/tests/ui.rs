@@ -60,6 +60,47 @@ fn overview_exposes_pairing_milestones_without_extra_rows() {
 }
 
 #[test]
+fn detail_keeps_audio_diagnostics_topology_stable() {
+    let mut model = Model {
+        connected: Some(Default::default()),
+        connection: ConnectionState::Ready,
+        stream: StreamState::Open,
+        ..Default::default()
+    };
+    let before = ui::detail(&model).unwrap();
+
+    model.details.audio_state = 4;
+    model.details.audio_stage = 7;
+    model.details.decoded_sample_rate = 24_000;
+    model.details.decoded_channels = 2;
+    model.details.input_used = 3072;
+    model.details.pcm_frames = 1058;
+    model.details.audio_rtp_packets = 2;
+    model.details.underruns = 1;
+    model.details.audio_error = -1206;
+    let after = ui::detail(&model).unwrap();
+
+    assert_eq!(before.node_count, after.node_count);
+    for index in 0..before.node_count as usize {
+        assert_eq!(before.nodes[index].key, after.nodes[index].key);
+        assert_eq!(before.nodes[index].kind(), after.nodes[index].kind());
+    }
+    assert_eq!(after.secondary(after.find_by_key(37).unwrap()), "RTP sent");
+    assert_eq!(
+        after.secondary(after.find_by_key(38).unwrap()),
+        "Playing / 3072 B"
+    );
+    assert_eq!(
+        after.secondary(after.find_by_key(39).unwrap()),
+        "24000 Hz / 2 ch"
+    );
+    assert_eq!(after.secondary(after.find_by_key(40).unwrap()), "1058");
+    assert_eq!(after.secondary(after.find_by_key(41).unwrap()), "2");
+    assert_eq!(after.secondary(after.find_by_key(42).unwrap()), "1");
+    assert_eq!(after.secondary(after.find_by_key(43).unwrap()), "-1206");
+}
+
+#[test]
 fn detail_enables_audio_tests_only_when_stream_ready() {
     let mut model = Model {
         connected: Some(Default::default()),

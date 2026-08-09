@@ -11,11 +11,11 @@ use canopus_bluetooth_audio_core::audio_input::{
 };
 use canopus_target_private::{bt_alloc, bt_free, canopus_fw_register_driver, file_operations};
 
-use super::audio_stream;
+use super::{audio_stream, runtime::with_core};
 
 const DEVICE_PATH: &[u8] = b"/dev/canopus_audio\0";
 const DEVICE_MODE: u32 = 0o666;
-pub const INPUT_CAPACITY: usize = 16 * 1024;
+pub const INPUT_CAPACITY: usize = 4 * 1024;
 
 const IOC_GET_ABI: u32 = 0x4341_0001;
 const IOC_SET_FORMAT: u32 = 0x4341_0002;
@@ -104,18 +104,25 @@ fn schedule_control(result: Result<(), InputError>, schedule: fn() -> Result<(),
     }
 }
 
+fn serialized_control(
+    control: impl FnOnce() -> Result<(), InputError>,
+    schedule: fn() -> Result<(), i32>,
+) -> i32 {
+    with_core(|_| schedule_control(control(), schedule))
+}
+
 extern "C" fn audio_open(_file: *mut c_void) -> i32 {
-    errno(input().open())
+    with_core(|_| errno(input().open()))
 }
 
 extern "C" fn audio_close(_file: *mut c_void) -> i32 {
-    match input().close() {
+    with_core(|_| match input().close() {
         Ok(()) => match audio_stream::schedule_close() {
             Ok(()) => 0,
             Err(error) => error,
         },
         Err(error) => error.errno(),
-    }
+    })
 }
 
 extern "C" fn audio_read(_file: *mut c_void, _buffer: *mut c_void, _count: u32) -> i32 {
@@ -158,14 +165,14 @@ extern "C" fn audio_ioctl(_file: *mut c_void, command: i32, argument: usize) -> 
             }
             // SAFETY: ioctl ABI requires a readable FormatV1 argument.
             let format = unsafe { (argument as *const FormatV1).read_unaligned() };
-            schedule_control(input().set_format(&format), audio_stream::schedule_flush)
+            serialized_control(|| input().set_format(&format), audio_stream::schedule_flush)
         }
-        IOC_START => schedule_control(input().start(), audio_stream::schedule_start),
-        IOC_PAUSE => schedule_control(input().pause(), audio_stream::schedule_pause),
-        IOC_RESUME => schedule_control(input().resume(), audio_stream::schedule_resume),
-        IOC_STOP => schedule_control(input().stop(), audio_stream::schedule_stop),
-        IOC_DRAIN => schedule_control(input().drain(), audio_stream::schedule_drain),
-        IOC_FLUSH => schedule_control(input().flush(), audio_stream::schedule_flush),
+        IOC_START => serialized_control(|| input().start(), audio_stream::schedule_start),
+        IOC_PAUSE => serialized_control(|| input().pause(), audio_stream::schedule_pause),
+        IOC_RESUME => serialized_control(|| input().resume(), audio_stream::schedule_resume),
+        IOC_STOP => serialized_control(|| input().stop(), audio_stream::schedule_stop),
+        IOC_DRAIN => serialized_control(|| input().drain(), audio_stream::schedule_drain),
+        IOC_FLUSH => serialized_control(|| input().flush(), audio_stream::schedule_flush),
         IOC_GET_STATUS => {
             if argument == 0 {
                 return InputError::Invalid.errno();
