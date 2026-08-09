@@ -10,7 +10,7 @@ use canopus_bluetooth_audio_core::{
     audio_input::{
         FORMAT_MP3, FormatV1, STATE_BUFFERING, STATE_DRAINING, STATE_PAUSED, STATE_PLAYING,
     },
-    media::{FRAME_SAMPLES, StreamPacketizer},
+    media::{FRAME_SAMPLES, MAX_FRAMES_PER_PACKET, StreamPacketizer},
     mp3::{MIN_DECODE_INPUT, Mp3ByteStream, StreamProgress},
 };
 use canopus_target_private::*;
@@ -19,7 +19,7 @@ use super::{
     audio_device,
     runtime::{
         Core, ERR_AUDIO_CODEC, ERR_AUDIO_DECODE, ERR_AUDIO_QUEUE, ERR_MEDIA_ALLOC, ERR_MEDIA_STATE,
-        MEDIA_COMPLETE, MEDIA_STREAMING, runtime, with_core,
+        ERRNO_EBUSY, MEDIA_COMPLETE, MEDIA_STREAMING, runtime,
     },
     sbc_encoder::SbcEncoder,
     transport,
@@ -36,11 +36,15 @@ const WORK_DRAIN: u8 = 6;
 const WORK_FLUSH: u8 = 7;
 const WORK_CLOSE: u8 = 8;
 const WORK_TEST_PREPARE: u8 = 9;
+const WORK_TEST_DECODE_PREPARE: u8 = 10;
 const INGEST_CHUNK: usize = 512;
 const LONG_TEST_PREBUFFER: usize = MIN_DECODE_INPUT;
 const LONG_TEST_REFILL_LOW_WATER: usize = MIN_DECODE_INPUT;
 const LONG_TEST_REFILL_TARGET: usize = 4 * 1024;
-const PCM_FRAME_CAPACITY: usize = 1152 + FRAME_SAMPLES as usize - 1;
+const DECODE_ONLY_STEP_DELAY_MS: u32 = 10;
+const MAX_DECODED_PCM_FRAMES: usize = 1152;
+const PCM_FRAME_CAPACITY: usize =
+    MAX_DECODED_PCM_FRAMES + MAX_FRAMES_PER_PACKET as usize * FRAME_SAMPLES as usize - 1;
 const PCM_SAMPLES: usize = 2 * PCM_FRAME_CAPACITY;
 const LONG_TEST_AUDIO_PATH: &[u8] = b"/data/canopus/tmp_btaudio_module_long_audio_test.mp3\0";
 
@@ -55,12 +59,14 @@ pub const AUDIO_STAGE_RTP: u32 = 7;
 pub const AUDIO_STAGE_DRAINING: u32 = 8;
 pub const AUDIO_STAGE_COMPLETE: u32 = 9;
 pub const AUDIO_STAGE_FAILED: u32 = 10;
+pub const AUDIO_STAGE_DECODE_ONLY: u32 = 11;
 
 #[repr(C)]
 struct WorkToken {
     runtime_generation: u32,
     audio_generation: u32,
     command: u32,
+    attempts: u32,
 }
 
 #[repr(C)]
@@ -82,8 +88,8 @@ struct Pipeline {
     packetizer: MaybeUninit<StreamPacketizer>,
     packetizer_ready: bool,
     session_generation: u32,
-    next_packet_deadline_ms: u64,
     marker: bool,
+    next_packet_deadline_ms: u32,
 }
 
 static PIPELINE: AtomicUsize = AtomicUsize::new(0);
@@ -93,12 +99,25 @@ static WAKE_AUDIO_GENERATION: AtomicU32 = AtomicU32::new(0);
 static AUDIO_STAGE: AtomicU32 = AtomicU32::new(AUDIO_STAGE_IDLE);
 static LONG_TEST_FD: AtomicI32 = AtomicI32::new(-1);
 static LONG_TEST_OWNS_INPUT: AtomicBool = AtomicBool::new(false);
+static LONG_TEST_DECODE_ONLY: AtomicBool = AtomicBool::new(false);
+static TEST_STARTED_MS: AtomicU32 = AtomicU32::new(0);
+static TEST_ELAPSED_MS: AtomicU32 = AtomicU32::new(0);
+static DECODE_CPU_MS: AtomicU32 = AtomicU32::new(0);
+static STARTUP_MS: AtomicU32 = AtomicU32::new(0);
 
 pub fn diagnostic_stage() -> u32 {
     AUDIO_STAGE.load(Ordering::Acquire)
 }
 
-fn monotonic_ms() -> Option<u64> {
+pub fn diagnostic_timing() -> (u32, u32, u32) {
+    (
+        TEST_ELAPSED_MS.load(Ordering::Acquire),
+        DECODE_CPU_MS.load(Ordering::Acquire),
+        STARTUP_MS.load(Ordering::Acquire),
+    )
+}
+
+fn monotonic_ms() -> Option<u32> {
     let mut value = stock_timespec_t {
         tv_sec: 0,
         tv_nsec: 0,
@@ -108,7 +127,20 @@ fn monotonic_ms() -> Option<u64> {
     if result != 0 || value.tv_sec < 0 || !(0..1_000_000_000).contains(&value.tv_nsec) {
         return None;
     }
-    Some(value.tv_sec as u64 * 1_000 + value.tv_nsec as u64 / 1_000_000)
+    Some((value.tv_sec as u64 * 1_000 + value.tv_nsec as u64 / 1_000_000) as u32)
+}
+
+fn update_elapsed() {
+    let started = TEST_STARTED_MS.load(Ordering::Acquire);
+    if started != 0
+        && let Some(now) = monotonic_ms()
+    {
+        TEST_ELAPSED_MS.store(now.wrapping_sub(started), Ordering::Release);
+    }
+}
+
+pub fn long_test_owns_input() -> bool {
+    LONG_TEST_OWNS_INPUT.load(Ordering::Acquire)
 }
 
 fn pipeline() -> Option<&'static mut Pipeline> {
@@ -166,8 +198,8 @@ impl Pipeline {
         self.packetizer.write(packetizer);
         self.packetizer_ready = true;
         self.session_generation = generation;
-        self.next_packet_deadline_ms = 0;
         self.marker = true;
+        self.next_packet_deadline_ms = 0;
         Ok(())
     }
 
@@ -178,8 +210,8 @@ impl Pipeline {
         self.pcm_offset = 0;
         self.packetizer_ready = false;
         self.session_generation = generation;
-        self.next_packet_deadline_ms = 0;
         self.marker = true;
+        self.next_packet_deadline_ms = 0;
     }
 
     fn ready_for(&self, generation: u32) -> bool {
@@ -202,23 +234,27 @@ impl Pipeline {
         Ok(unsafe { self.encoder.assume_init_mut() })
     }
 
+    /// Keeps packet timestamps on the codec clock rather than adding decode,
+    /// encode, allocation, and callback runtime to every relative timer delay.
+    /// A late callback emits at most one packet and resets after 50 ms, so this
+    /// compensates ordinary work without an unbounded catch-up burst.
     fn next_packet_delay(&mut self, frames: u8) -> Result<u32, i32> {
         let interval = self.packetizer()?.next_delay_ms(frames);
         let Some(now) = monotonic_ms() else {
             return Ok(interval);
         };
-        let base = if self.next_packet_deadline_ms == 0
-            || now.saturating_sub(self.next_packet_deadline_ms) > 50
-        {
-            now
-        } else {
-            self.next_packet_deadline_ms
-        };
-        self.next_packet_deadline_ms = base + u64::from(interval);
-        Ok(self
-            .next_packet_deadline_ms
-            .saturating_sub(now)
-            .clamp(1, u64::from(u32::MAX)) as u32)
+        if self.next_packet_deadline_ms == 0 {
+            self.next_packet_deadline_ms = now.wrapping_add(interval);
+            return Ok(interval);
+        }
+        let lateness = now.wrapping_sub(self.next_packet_deadline_ms) as i32;
+        if lateness > 50 {
+            self.next_packet_deadline_ms = now.wrapping_add(interval);
+            return Ok(interval);
+        }
+        self.next_packet_deadline_ms = self.next_packet_deadline_ms.wrapping_add(interval);
+        let remaining = self.next_packet_deadline_ms.wrapping_sub(now) as i32;
+        Ok(if remaining > 0 { remaining as u32 } else { 1 })
     }
 }
 
@@ -233,6 +269,7 @@ fn queue(command: u8) -> Result<(), i32> {
             runtime_generation: r.generation,
             audio_generation: audio_device::input().generation(),
             command: command as u32,
+            attempts: 0,
         });
     }
     let owner = unsafe { bt_l2cap_owner() };
@@ -329,6 +366,14 @@ pub fn schedule_close() -> Result<(), i32> {
 }
 
 pub fn start_long_test() -> Result<(), i32> {
+    start_long_test_mode(WORK_TEST_PREPARE, false)
+}
+
+pub fn start_long_test_decode_only() -> Result<(), i32> {
+    start_long_test_mode(WORK_TEST_DECODE_PREPARE, true)
+}
+
+fn start_long_test_mode(command: u8, decode_only: bool) -> Result<(), i32> {
     if LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
         return Err(-16);
     }
@@ -348,9 +393,14 @@ pub fn start_long_test() -> Result<(), i32> {
         let _ = input.close();
         return Err(error.errno());
     }
+    LONG_TEST_DECODE_ONLY.store(decode_only, Ordering::Release);
+    TEST_STARTED_MS.store(monotonic_ms().unwrap_or(0), Ordering::Release);
+    TEST_ELAPSED_MS.store(0, Ordering::Release);
+    DECODE_CPU_MS.store(0, Ordering::Release);
+    STARTUP_MS.store(0, Ordering::Release);
     LONG_TEST_OWNS_INPUT.store(true, Ordering::Release);
     AUDIO_STAGE.store(AUDIO_STAGE_QUEUED, Ordering::Release);
-    if let Err(error) = queue(WORK_TEST_PREPARE) {
+    if let Err(error) = queue(command) {
         AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
         release_long_test_input();
         return Err(error);
@@ -359,16 +409,18 @@ pub fn start_long_test() -> Result<(), i32> {
 }
 
 fn release_long_test_input() {
+    update_elapsed();
     let fd = LONG_TEST_FD.swap(-1, Ordering::AcqRel);
     if fd >= 0 {
         unsafe { nuttx_close(fd) };
     }
     if LONG_TEST_OWNS_INPUT.swap(false, Ordering::AcqRel) {
+        LONG_TEST_DECODE_ONLY.store(false, Ordering::Release);
         let _ = audio_device::input().close();
     }
 }
 
-fn prepare_long_test() -> i32 {
+fn prepare_long_test(decode_only: bool) -> i32 {
     AUDIO_STAGE.store(AUDIO_STAGE_PREBUFFER, Ordering::Release);
     if !LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
         return 0;
@@ -405,9 +457,22 @@ fn prepare_long_test() -> i32 {
     if let Err(error) = input.start() {
         return error.errno();
     }
-    match schedule_start() {
-        Ok(()) => 0,
-        Err(error) => error,
+    if decode_only {
+        let generation = input.generation();
+        let pipeline = match allocate_pipeline() {
+            Ok(pipeline) => pipeline,
+            Err(error) => return error,
+        };
+        pipeline.reset(generation);
+        update_elapsed();
+        STARTUP_MS.store(TEST_ELAPSED_MS.load(Ordering::Acquire), Ordering::Release);
+        AUDIO_STAGE.store(AUDIO_STAGE_DECODE_ONLY, Ordering::Release);
+        schedule_timer(1, generation)
+    } else {
+        match schedule_start() {
+            Ok(()) => 0,
+            Err(error) => error,
+        }
     }
 }
 
@@ -475,7 +540,20 @@ extern "C" fn audio_wake_work(_owner_valid: i32, event: i32, _argument: *mut c_v
     {
         return 0;
     }
-    let result = with_core(|core| dispatch(core, WORK_WAKE, generation));
+    let result = match super::runtime::try_with_core(|core| dispatch(core, WORK_WAKE, generation)) {
+        Some(result) => result,
+        None => {
+            if transport::queue_audio_retry(
+                audio_wake_work,
+                WORK_WAKE,
+                core::ptr::dangling_mut::<c_void>(),
+            ) {
+                WAKE_QUEUED.store(true, Ordering::Release);
+                return 0;
+            }
+            ERRNO_EBUSY
+        }
+    };
     if result != 0 {
         AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
         audio_device::input().fail(generation, result);
@@ -492,22 +570,35 @@ extern "C" fn audio_work(_owner_valid: i32, event: i32, argument: *mut c_void) -
     if argument.is_null() {
         return 0;
     }
-    let token = unsafe { (argument as *const WorkToken).read() };
-    unsafe { bt_free(argument) };
+    let token = argument.cast::<WorkToken>();
     let r = runtime();
     let input = audio_device::input();
-    if token.runtime_generation != r.generation
-        || token.audio_generation != input.generation()
-        || token.command != event as u32
+    if unsafe { (*token).runtime_generation } != r.generation
+        || unsafe { (*token).audio_generation } != input.generation()
+        || unsafe { (*token).command } != event as u32
     {
+        unsafe { bt_free(argument) };
         return 0;
     }
-    let result = with_core(|core| dispatch(core, token.command as u8, token.audio_generation));
+    let generation = unsafe { (*token).audio_generation };
+    let command = unsafe { (*token).command as u8 };
+    let result = match super::runtime::try_with_core(|core| dispatch(core, command, generation)) {
+        Some(result) => result,
+        None if unsafe { (*token).attempts } == 0 => {
+            unsafe { (*token).attempts = 1 };
+            if transport::queue_audio_retry(audio_work, command, argument) {
+                return 0;
+            }
+            ERRNO_EBUSY
+        }
+        None => ERRNO_EBUSY,
+    };
+    unsafe { bt_free(argument) };
     if result != 0 {
         AUDIO_STAGE.store(AUDIO_STAGE_FAILED, Ordering::Release);
-        input.fail(token.audio_generation, result);
+        input.fail(generation, result);
         r.last_error.store(result, Ordering::Release);
-        transport::audio_failed(token.audio_generation);
+        transport::audio_failed(generation);
         if LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
             release_long_test_input();
         }
@@ -526,7 +617,7 @@ fn dispatch(core: &mut Core, command: u8, generation: u32) -> i32 {
                 return 0;
             }
             if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
-                pump(core, generation)
+                pump_active(core, generation)
             } else if runtime().media_state.load(Ordering::Acquire) == MEDIA_COMPLETE {
                 match transport::start_audio(core, generation) {
                     Ok(()) => 0,
@@ -542,7 +633,7 @@ fn dispatch(core: &mut Core, command: u8, generation: u32) -> i32 {
         }
         WORK_RESUME => {
             if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
-                pump(core, generation)
+                pump_active(core, generation)
             } else {
                 match transport::start_audio(core, generation) {
                     Ok(()) => 0,
@@ -562,8 +653,9 @@ fn dispatch(core: &mut Core, command: u8, generation: u32) -> i32 {
             }
             0
         }
-        WORK_DRAIN => pump(core, generation),
-        WORK_TEST_PREPARE => prepare_long_test(),
+        WORK_DRAIN => pump_active(core, generation),
+        WORK_TEST_PREPARE => prepare_long_test(false),
+        WORK_TEST_DECODE_PREPARE => prepare_long_test(true),
         _ => ERR_AUDIO_QUEUE,
     }
 }
@@ -576,15 +668,18 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
     if input.generation() != generation {
         return 0;
     }
+    update_elapsed();
+    STARTUP_MS.store(TEST_ELAPSED_MS.load(Ordering::Acquire), Ordering::Release);
     if let Some(pipeline) = pipeline()
         && pipeline.ready_for(generation)
     {
         pipeline.marker = true;
+        pipeline.next_packet_deadline_ms = 0;
         runtime()
             .media_state
             .store(MEDIA_STREAMING, Ordering::Release);
         AUDIO_STAGE.store(AUDIO_STAGE_DECODE, Ordering::Release);
-        return pump(core, generation);
+        return pump_active(core, generation);
     }
     let sbc = &core.source.selected_sbc;
     if sbc.frequency_channel != 0x22
@@ -601,14 +696,98 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
     if let Err(error) = pipeline.begin(generation, mtu, sbc.maximum_bitpool) {
         return error;
     }
+    transport::reset_audio_media_flow();
     runtime()
         .media_state
         .store(MEDIA_STREAMING, Ordering::Release);
     AUDIO_STAGE.store(AUDIO_STAGE_DECODE, Ordering::Release);
-    pump(core, generation)
+    pump_active(core, generation)
 }
 
-fn pump(core: &mut Core, generation: u32) -> i32 {
+fn pump_decode_only(generation: u32) -> i32 {
+    let input = audio_device::input();
+    if input.generation() != generation {
+        return 0;
+    }
+    if runtime().audio_timer_handle.load(Ordering::Acquire) != 0 {
+        return 0;
+    }
+    let mut state = input.state();
+    if state != STATE_BUFFERING && state != STATE_PLAYING && state != STATE_DRAINING {
+        return 0;
+    }
+    let pipeline = match pipeline() {
+        Some(pipeline) if pipeline.session_generation == generation => pipeline,
+        _ => return ERR_MEDIA_STATE,
+    };
+    let refill = refill_long_test(input, &mut pipeline.ingest, pipeline.stream.pending());
+    if refill != 0 {
+        return refill;
+    }
+    state = input.state();
+    while pipeline.stream.free() != 0 && input.ring.used() != 0 {
+        let count = pipeline
+            .ingest
+            .len()
+            .min(pipeline.stream.free())
+            .min(input.ring.used());
+        let consumed = input.consume(&mut pipeline.ingest[..count]);
+        if consumed == 0 {
+            break;
+        }
+        if pipeline.stream.push(&pipeline.ingest[..consumed]) != consumed {
+            return ERR_AUDIO_DECODE;
+        }
+    }
+
+    let end_of_input = state == STATE_DRAINING && input.ring.used() == 0;
+    let decode_started = monotonic_ms();
+    let progress = pipeline
+        .stream
+        .decode_next(input.volume(), &mut pipeline.pcm, end_of_input);
+    if let (Some(started), Some(finished)) = (decode_started, monotonic_ms()) {
+        DECODE_CPU_MS.fetch_add(finished.wrapping_sub(started), Ordering::Relaxed);
+    }
+    update_elapsed();
+    match progress {
+        Ok(StreamProgress::Frame {
+            frames,
+            sample_rate,
+            channels,
+            ..
+        }) => {
+            if frames > PCM_FRAME_CAPACITY
+                || !input.decoded_format_matches(sample_rate, channels as u32)
+            {
+                return ERR_AUDIO_DECODE;
+            }
+            input.add_pcm_frames(generation, frames as u32);
+            input.mark_playing(generation, sample_rate, channels as u32, 0);
+            AUDIO_STAGE.store(AUDIO_STAGE_DECODE_ONLY, Ordering::Release);
+            schedule_timer(DECODE_ONLY_STEP_DELAY_MS, generation)
+        }
+        Ok(StreamProgress::Skipped { .. }) => schedule_timer(1, generation),
+        Ok(StreamProgress::NeedInput) if end_of_input => {
+            pipeline.stream.discard_incomplete();
+            input.mark_drained(generation, true);
+            AUDIO_STAGE.store(AUDIO_STAGE_COMPLETE, Ordering::Release);
+            release_long_test_input();
+            0
+        }
+        Ok(StreamProgress::NeedInput) => schedule_timer(1, generation),
+        Err(_) => ERR_AUDIO_DECODE,
+    }
+}
+
+fn pump_active(core: &mut Core, generation: u32) -> i32 {
+    if LONG_TEST_DECODE_ONLY.load(Ordering::Acquire) {
+        pump_decode_only(generation)
+    } else {
+        pump_stream(core, generation)
+    }
+}
+
+fn pump_stream(core: &mut Core, generation: u32) -> i32 {
     let input = audio_device::input();
     if input.generation() != generation {
         return 0;
@@ -650,7 +829,11 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
         }
     }
 
-    if pipeline.pcm_frames - pipeline.pcm_offset < FRAME_SAMPLES as usize {
+    let target_pcm_frames = match pipeline.packetizer() {
+        Ok(packetizer) => packetizer.frames_per_packet as usize * FRAME_SAMPLES as usize,
+        Err(error) => return error,
+    };
+    if pipeline.pcm_frames - pipeline.pcm_offset < target_pcm_frames {
         let carry = pipeline.pcm_frames - pipeline.pcm_offset;
         if carry != 0 {
             pipeline
@@ -660,11 +843,17 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
         pipeline.pcm_offset = 0;
         pipeline.pcm_frames = carry;
         let end_of_input = state == STATE_DRAINING && input.ring.used() == 0;
-        match pipeline.stream.decode_next(
+        let decode_started = monotonic_ms();
+        let progress = pipeline.stream.decode_next(
             input.volume(),
             &mut pipeline.pcm[carry * 2..],
             end_of_input,
-        ) {
+        );
+        if let (Some(started), Some(finished)) = (decode_started, monotonic_ms()) {
+            DECODE_CPU_MS.fetch_add(finished.wrapping_sub(started), Ordering::Relaxed);
+        }
+        update_elapsed();
+        match progress {
             Ok(StreamProgress::Frame {
                 frames,
                 sample_rate,
@@ -687,8 +876,12 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
             }
             Ok(StreamProgress::Skipped { .. }) => return schedule_timer(1, generation),
             Ok(StreamProgress::NeedInput) if end_of_input && carry != 0 => {
-                pipeline.pcm[carry * 2..FRAME_SAMPLES as usize * 2].fill(0);
-                pipeline.pcm_frames = FRAME_SAMPLES as usize;
+                let padded_frames = carry.div_ceil(FRAME_SAMPLES as usize) * FRAME_SAMPLES as usize;
+                if padded_frames > PCM_FRAME_CAPACITY {
+                    return ERR_AUDIO_DECODE;
+                }
+                pipeline.pcm[carry * 2..padded_frames * 2].fill(0);
+                pipeline.pcm_frames = padded_frames;
             }
             Ok(StreamProgress::NeedInput) if end_of_input => {
                 pipeline.stream.discard_incomplete();
@@ -773,6 +966,7 @@ fn pump(core: &mut Core, generation: u32) -> i32 {
     AUDIO_STAGE.store(AUDIO_STAGE_RTP, Ordering::Release);
     pipeline.pcm_offset += packet_frames as usize * FRAME_SAMPLES as usize;
     input.add_rtp_packets(generation, 1);
+    update_elapsed();
     let delay = match pipeline.next_packet_delay(packet_frames) {
         Ok(delay) => delay,
         Err(error) => return error,
@@ -883,14 +1077,12 @@ fn audio_timer_callback_impl(
         if owner_valid == 0 || event != AUDIO_TIMER_EVENT as i32 {
             ERR_AUDIO_QUEUE
         } else {
-            pump(core, token.audio_generation)
+            pump_active(core, token.audio_generation)
         }
     };
-    let result = if blocking {
-        Some(with_core(dispatch))
-    } else {
-        super::runtime::try_with_core(dispatch)
-    };
+    // Never block in the Bluetooth-owner retry path: doing so can starve the
+    // lower-priority context that currently owns CORE_LOCK.
+    let result = super::runtime::try_with_core(dispatch);
     if let Some(result) = result {
         let generation = token.audio_generation;
         unsafe { bt_free(argument) };
@@ -905,7 +1097,8 @@ fn audio_timer_callback_impl(
         }
         return 0;
     }
-    if owner_valid != 0
+    if !blocking
+        && owner_valid != 0
         && transport::queue_audio_retry(audio_timer_retry, AUDIO_TIMER_EVENT, argument)
     {
         return 0;

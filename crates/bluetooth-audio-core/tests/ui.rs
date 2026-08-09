@@ -109,9 +109,11 @@ fn detail_enables_audio_tests_only_when_stream_ready() {
     let first = ui::detail(&model).unwrap();
     assert!(!first.find_by_key(34).unwrap().enabled());
     assert!(!first.find_by_key(35).unwrap().enabled());
+    assert!(!first.find_by_key(44).unwrap().enabled());
     model.connection = ConnectionState::Ready;
     model.stream = StreamState::Open;
     let ready = ui::detail(&model).unwrap();
     assert!(ready.find_by_key(34).unwrap().enabled());
     assert!(ready.find_by_key(35).unwrap().enabled());
+    assert!(ready.find_by_key(44).unwrap().enabled());
 }

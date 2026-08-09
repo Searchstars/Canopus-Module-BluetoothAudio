@@ -23,6 +23,8 @@ use super::{audio_device, audio_stream, bluetooth};
 
 const MEDIA_TIMER_EVENT: u8 = 9;
 const MEDIA_TIMER_TAG: &[u8] = b"A2DPM\0";
+const CALLBACK_RETRY_TAG: &[u8] = b"A2DPR\0";
+const CALLBACK_RETRY_DELAY_MS: u32 = 5;
 
 #[repr(C)]
 struct MediaRetryToken {
@@ -315,11 +317,15 @@ fn send_signaling(sdu: &[u8]) -> i32 {
     if buffer.is_null() {
         return ERR_ALLOC;
     }
-    unsafe {
+    let queued = unsafe {
         (*buffer).type_ = 1;
         let payload = stock_buffer_payload_mut(buffer);
         core::ptr::copy_nonoverlapping(sdu.as_ptr(), payload, sdu.len());
-        bt_l2cap_submit_cid(buffer, cid);
+        bt_l2cap_submit_cid(buffer, cid)
+    };
+    if queued == 0 {
+        unsafe { bt_free(buffer.cast()) };
+        return ERR_AUDIO_QUEUE;
     }
     0
 }
@@ -334,13 +340,21 @@ fn send_media(sdu: &[u8]) -> i32 {
     if buffer.is_null() {
         return ERR_MEDIA_ALLOC;
     }
-    unsafe {
+    let queued = unsafe {
         (*buffer).type_ = 1;
         let payload = stock_buffer_payload_mut(buffer);
         core::ptr::copy_nonoverlapping(sdu.as_ptr(), payload, sdu.len());
-        bt_l2cap_submit_cid(buffer, cid);
+        bt_l2cap_submit_cid(buffer, cid)
+    };
+    if queued == 0 {
+        unsafe { bt_free(buffer.cast()) };
+        return ERR_AUDIO_QUEUE;
     }
     0
+}
+
+pub(super) fn reset_audio_media_flow() {
+    runtime().media_tx_outstanding.store(0, Ordering::Release);
 }
 
 pub(super) fn send_audio_media(sdu: &[u8]) -> i32 {
@@ -437,8 +451,20 @@ fn queue_owned_callback(run: QueueWork, event: u8, argument: *mut core::ffi::c_v
     if owner.is_null() {
         return false;
     }
-    let queued = unsafe { bt_queue_external(owner, run, bt_queue_free_addr(), argument, event) };
-    !queued.is_null()
+    // A tail-queued retry can run again before a lower-priority UI lock holder
+    // is scheduled. A short one-shot timer yields the CPU and bounds the retry
+    // to one attempt without ever spinning in the Bluetooth owner.
+    unsafe {
+        bt_timer_add(
+            owner,
+            CALLBACK_RETRY_DELAY_MS,
+            event,
+            run as *const () as *mut core::ffi::c_void,
+            argument,
+            CALLBACK_RETRY_TAG.as_ptr(),
+            1,
+        ) != 0
+    }
 }
 
 pub(super) fn queue_audio_retry(
@@ -605,16 +631,17 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
         }
         result
     };
-    let handled = if blocking {
-        Some(with_core(dispatch))
-    } else {
-        try_with_core(dispatch)
-    };
+    // A queued retry runs in a high-priority Bluetooth owner context. Blocking
+    // here can priority-invert the lower-priority lock holder forever, so both
+    // the original callback and its single retry must remain non-blocking.
+    let handled = try_with_core(dispatch);
     if handled.is_some() {
         unsafe { bt_free(argument) };
         return 0;
     }
-    if event <= u8::MAX as u32 && queue_owned_callback(signaling_retry_work, event as u8, argument)
+    if !blocking
+        && event <= u8::MAX as u32
+        && queue_owned_callback(signaling_retry_work, event as u8, argument)
     {
         return 0;
     }
@@ -688,21 +715,6 @@ extern "C" fn media_l2cap_callback_odd(event: u32, argument: *mut core::ffi::c_v
     media_l2cap_callback_impl(event, argument, 1, false, None)
 }
 
-extern "C" fn media_retry_cancel(
-    _owner_valid: i32,
-    _event: i32,
-    argument: *mut core::ffi::c_void,
-) -> i32 {
-    if !argument.is_null() {
-        let token = unsafe { &*argument.cast::<MediaRetryToken>() };
-        if !token.argument.is_null() {
-            unsafe { bt_free(token.argument) };
-        }
-        unsafe { bt_free(argument) };
-    }
-    0
-}
-
 extern "C" fn media_retry_work(
     _owner_valid: i32,
     event: i32,
@@ -743,20 +755,19 @@ fn queue_media_retry(event: u32, argument: *mut core::ffi::c_void, generation: u
         });
     }
     let owner = unsafe { bt_l2cap_owner() };
-    let queued = if owner.is_null() {
-        core::ptr::null_mut()
-    } else {
-        unsafe {
-            bt_queue_external(
+    let queued = !owner.is_null()
+        && unsafe {
+            bt_timer_add(
                 owner,
-                media_retry_work,
-                media_retry_cancel as *const () as *mut core::ffi::c_void,
-                token.cast(),
+                CALLBACK_RETRY_DELAY_MS,
                 event as u8,
-            )
-        }
-    };
-    if queued.is_null() {
+                media_retry_work as *const () as *mut core::ffi::c_void,
+                token.cast(),
+                CALLBACK_RETRY_TAG.as_ptr(),
+                1,
+            ) != 0
+        };
+    if !queued {
         unsafe { bt_free(token.cast()) };
         return false;
     }
@@ -803,6 +814,7 @@ fn media_l2cap_callback_impl(
                 if media_state == MEDIA_CONNECTING {
                     let mtu = unsafe { u16_at(packet, EVENT_COMPLETE_MTU_OFFSET) };
                     r.media_mtu.store(mtu as u32, Ordering::Release);
+                    r.media_tx_outstanding.store(0, Ordering::Release);
                     r.media_state.store(MEDIA_CONNECTED, Ordering::Release);
                     core.source.media_connected = true;
                     let start_pending = r
@@ -843,7 +855,7 @@ fn media_l2cap_callback_impl(
                 }
                 0
             }
-            EVENT_CHANNEL_STATUS_4 | EVENT_CHANNEL_STATUS_5 | EVENT_FLOW_STATUS | EVENT_DATA => 0,
+            EVENT_CHANNEL_STATUS_4 | EVENT_CHANNEL_STATUS_5 | EVENT_DATA | EVENT_FLOW_STATUS => 0,
             EVENT_DISCONNECTION_COMPLETE => {
                 let cid = unsafe { u16_at(packet, 0) };
                 let reason = unsafe { u16_at(packet, 2) };
@@ -855,6 +867,7 @@ fn media_l2cap_callback_impl(
                 core.source.media_connected = false;
                 r.media_cid.store(0, Ordering::Release);
                 r.media_mtu.store(0, Ordering::Release);
+                r.media_tx_outstanding.store(0, Ordering::Release);
                 r.last_error.store(
                     if reason == 0 { 0 } else { ERR_MEDIA_REMOTE },
                     Ordering::Release,
@@ -871,16 +884,15 @@ fn media_l2cap_callback_impl(
         }
         result
     };
-    let handled = if blocking {
-        Some(with_core(dispatch))
-    } else {
-        try_with_core(dispatch)
-    };
+    // A queued retry runs in a high-priority Bluetooth owner context. Blocking
+    // here can priority-invert the lower-priority lock holder forever, so both
+    // the original callback and its single retry must remain non-blocking.
+    let handled = try_with_core(dispatch);
     if handled.is_some() {
         unsafe { bt_free(argument) };
         return 0;
     }
-    if queue_media_retry(event, argument, media_generation) {
+    if !blocking && queue_media_retry(event, argument, media_generation) {
         return 0;
     }
     r.last_error.store(ERRNO_EBUSY, Ordering::Release);
@@ -1008,7 +1020,7 @@ pub fn audio_failed(_generation: u32) {
     ) {
         r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
     }
-    with_core(|core| {
+    let _ = try_with_core(|core| {
         if core.source.state == SourceState::Open || core.source.state == SourceState::Streaming {
             core.controller.model.stream = StreamState::Open;
             core.controller.model.touch();
@@ -1324,11 +1336,7 @@ fn media_timer_callback_impl(
             media_schedule_packet(core)
         }
     };
-    let result = if blocking {
-        Some(with_core(dispatch))
-    } else {
-        try_with_core(dispatch)
-    };
+    let result = try_with_core(dispatch);
     if let Some(result) = result {
         unsafe { bt_free(argument) };
         if result != 0 {
@@ -1336,7 +1344,9 @@ fn media_timer_callback_impl(
         }
         return 0;
     }
-    if owner_valid != 0 && queue_owned_callback(media_timer_retry_work, MEDIA_TIMER_EVENT, argument)
+    if !blocking
+        && owner_valid != 0
+        && queue_owned_callback(media_timer_retry_work, MEDIA_TIMER_EVENT, argument)
     {
         return 0;
     }

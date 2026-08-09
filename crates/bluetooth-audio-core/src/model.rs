@@ -86,6 +86,9 @@ pub struct LinkDetails {
     pub pcm_frames: u32,
     pub audio_rtp_packets: u32,
     pub underruns: u32,
+    pub audio_elapsed_ms: u32,
+    pub decode_cpu_ms: u32,
+    pub startup_ms: u32,
     pub audio_error: i32,
 }
 

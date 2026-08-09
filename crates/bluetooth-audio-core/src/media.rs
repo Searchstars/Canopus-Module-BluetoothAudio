@@ -5,7 +5,11 @@ pub const FRAME_SAMPLES: u32 = 128;
 pub const MAX_FRAME_LENGTH: usize = 118;
 pub const RTP_HEADER: usize = 12;
 pub const SBC_HEADER: usize = 1;
-pub const MAX_FRAMES_PER_PACKET: u8 = 9;
+pub const MAX_FRAMES_PER_PACKET: u8 = 5;
+/// Proven safe transmit SDU ceiling for the exact-target stock L2CAP path.
+/// The peer may advertise a larger MTU, but the recovered production sender
+/// never submits more than 672 bytes on this firmware.
+pub const MAX_TX_SDU: usize = 672;
 const MAX_TONE_FRAMES_PER_PACKET: u8 = 5;
 pub const DEFAULT_SINK_DELAY_100US: u16 = 1_500;
 pub const MAX_STARTUP_PACKETS: u8 = 16;
@@ -35,7 +39,7 @@ pub struct StreamPacketizer {
 impl StreamPacketizer {
     pub fn new(mtu: u16, bitpool: u8) -> Result<Self, MediaError> {
         let frame_length = sbc_tone_frames::frame_length(bitpool).ok_or(MediaError::Codec)?;
-        let limit = usize::from(mtu).min(MAX_PACKET);
+        let limit = usize::from(mtu).min(MAX_TX_SDU);
         let mut frames = MAX_FRAMES_PER_PACKET;
         while frames > 1 && RTP_HEADER + SBC_HEADER + frames as usize * frame_length > limit {
             frames -= 1;
@@ -113,7 +117,7 @@ pub struct TonePacketizer {
 impl TonePacketizer {
     pub fn new(mtu: u16, bitpool: u8) -> Result<Self, MediaError> {
         let frame_length = sbc_tone_frames::frame_length(bitpool).ok_or(MediaError::Codec)?;
-        let limit = usize::from(mtu).min(672);
+        let limit = usize::from(mtu).min(MAX_TX_SDU);
         let mut frames = MAX_TONE_FRAMES_PER_PACKET;
         while frames > 1 && RTP_HEADER + SBC_HEADER + frames as usize * frame_length > limit {
             frames -= 1;
