@@ -163,8 +163,16 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     let mut speed = FixedText::<24>::default();
     let _ = write!(speed, "{}% realtime", realtime_percent);
     tree.status_row(46, "Decode rate", speed.as_str())?;
-    let startup = unsigned(model.details.startup_ms);
-    tree.status_row(47, "Startup ms", startup.as_str())?;
+    let mut startup = FixedText::<48>::default();
+    let _ = write!(
+        startup,
+        "{} ms (q{} p{} a{})",
+        model.details.startup_ms,
+        model.details.startup_queue_ms,
+        model.details.startup_prepare_ms,
+        model.details.startup_avdtp_ms,
+    );
+    tree.status_row(47, "Startup", startup.as_str())?;
     let rtp_per_second = if model.details.audio_elapsed_ms == 0 {
         0
     } else {

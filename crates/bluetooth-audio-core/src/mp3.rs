@@ -68,7 +68,8 @@ impl Mp3Decoder {
 
     pub fn reset(&mut self) {
         self.decoder.reset();
-        self.pcm.fill(0.0);
+        // The decoder overwrites every sample reported through `frames`; stale
+        // PCM beyond that range is never observed by conversion.
     }
 
     pub fn decode(&mut self, input: &[u8]) -> Result<DecodedFrame, Mp3Error> {

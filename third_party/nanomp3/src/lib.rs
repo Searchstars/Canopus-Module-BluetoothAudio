@@ -62,11 +62,12 @@ impl Decoder {
         unsafe { destination.write_bytes(0, 1) };
     }
 
-    /// Clears decoder history and scratch without a large stack temporary.
+    /// Clears only persistent decoder history. `scratch` is overwritten by each
+    /// decode path and does not carry stream state, so clearing that large
+    /// workspace here only delays a new stream.
     pub fn reset(&mut self) {
-        // Decoder has no drop-bearing fields and its all-zero representation is
-        // exactly the value established by `new`.
-        unsafe { (self as *mut Self).write_bytes(0, 1) };
+        // `mp3dec_t::new()` is all-zero and has no drop-bearing fields.
+        unsafe { core::ptr::addr_of_mut!(self.state).write_bytes(0, 1) };
     }
 
     /// Decode MP3 data into a buffer, returning the amount of MP3 data consumed and info about decoded samples.

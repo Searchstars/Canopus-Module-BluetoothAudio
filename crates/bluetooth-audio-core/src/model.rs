@@ -89,6 +89,9 @@ pub struct LinkDetails {
     pub audio_elapsed_ms: u32,
     pub decode_cpu_ms: u32,
     pub startup_ms: u32,
+    pub startup_queue_ms: u32,
+    pub startup_prepare_ms: u32,
+    pub startup_avdtp_ms: u32,
     pub audio_error: i32,
 }
 

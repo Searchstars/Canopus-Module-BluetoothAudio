@@ -524,16 +524,16 @@ fn enqueue_discovery_event(event: *mut DeferredDiscoveryEvent) -> bool {
     if owner.is_null() {
         return false;
     }
-    let queued = unsafe {
-        bt_queue_external(
+    unsafe {
+        let _ = bt_queue_external(
             owner,
             deferred_discovery_work,
             bt_queue_free_addr(),
             event.cast(),
             DISCOVERY_EVENT_QUEUE,
-        )
-    };
-    !queued.is_null()
+        );
+    }
+    true
 }
 
 fn defer_discovery(device: DiscoveredDevice) {
@@ -622,18 +622,14 @@ fn queue_core_event(kind: u8, address: [u8; 6]) -> bool {
             reserved: 0,
         });
     }
-    let queued = unsafe {
-        bt_queue_external(
+    unsafe {
+        let _ = bt_queue_external(
             owner,
             deferred_core_work,
             bt_queue_free_addr(),
             event.cast(),
             CORE_EVENT_QUEUE,
-        )
-    };
-    if queued.is_null() {
-        unsafe { bt_free(event.cast()) };
-        return false;
+        );
     }
     true
 }
