@@ -88,6 +88,13 @@ pub fn activate() -> i32 {
         runtime().last_error.store(error, Ordering::Release);
         return error;
     }
+    // Build the large decoder workspace during one-time activation rather than
+    // after AVDTP START has already been accepted. It remains resident and is
+    // reset cheaply for each subsequent stream.
+    if let Err(error) = with_core(|_| audio_stream::preallocate_pipeline()) {
+        runtime().last_error.store(error, Ordering::Release);
+        return error;
+    }
     0
 }
 
@@ -184,7 +191,14 @@ fn sync_target_model(core: &mut Core) {
         changed = true;
     }
     let audio = audio_device::input().status();
-    let (audio_elapsed_ms, decode_cpu_ms, startup_ms) = audio_stream::diagnostic_timing();
+    let (
+        audio_elapsed_ms,
+        decode_cpu_ms,
+        startup_ms,
+        startup_queue_ms,
+        startup_prepare_ms,
+        startup_avdtp_ms,
+    ) = audio_stream::diagnostic_timing();
     let audio_stage = audio_stream::diagnostic_stage() as u8;
     let bitpool = if audio.negotiated_bitpool != 0 {
         audio.negotiated_bitpool as u8
@@ -210,6 +224,9 @@ fn sync_target_model(core: &mut Core) {
         || details.audio_elapsed_ms != audio_elapsed_ms
         || details.decode_cpu_ms != decode_cpu_ms
         || details.startup_ms != startup_ms
+        || details.startup_queue_ms != startup_queue_ms
+        || details.startup_prepare_ms != startup_prepare_ms
+        || details.startup_avdtp_ms != startup_avdtp_ms
         || details.audio_error != audio_error
     {
         details.bitpool = bitpool;
@@ -224,6 +241,9 @@ fn sync_target_model(core: &mut Core) {
         details.audio_elapsed_ms = audio_elapsed_ms;
         details.decode_cpu_ms = decode_cpu_ms;
         details.startup_ms = startup_ms;
+        details.startup_queue_ms = startup_queue_ms;
+        details.startup_prepare_ms = startup_prepare_ms;
+        details.startup_avdtp_ms = startup_avdtp_ms;
         details.audio_error = audio_error;
         changed = true;
     }
@@ -358,25 +378,31 @@ fn handle_action(page_index: usize, event_id: u32) {
         return;
     }
     if event_id == ui::EVENT_TEST_TONE {
-        with_core(|core| {
+        let ready = with_core(|core| {
             if core.controller.model.connection == ConnectionState::Ready
                 && core.controller.model.stream == StreamState::Open
             {
-                match transport::play_tone(core) {
-                    Ok(()) => {
-                        runtime().last_error.store(0, Ordering::Release);
-                        core.controller.model.stream =
-                            if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
-                                StreamState::Streaming
-                            } else {
-                                StreamState::Starting
-                            };
-                        core.controller.model.touch();
-                    }
-                    Err(error) => runtime().last_error.store(error, Ordering::Release),
-                }
+                core.controller.model.stream = StreamState::Starting;
+                core.controller.model.touch();
+                true
+            } else {
+                false
             }
         });
+        if ready {
+            match transport::schedule_play_tone() {
+                Ok(()) => runtime().last_error.store(0, Ordering::Release),
+                Err(error) => {
+                    runtime().last_error.store(error, Ordering::Release);
+                    with_core(|core| {
+                        if core.controller.model.stream == StreamState::Starting {
+                            core.controller.model.stream = StreamState::Open;
+                            core.controller.model.touch();
+                        }
+                    });
+                }
+            }
+        }
         rebuild(page_index);
         return;
     }

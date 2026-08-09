@@ -5,8 +5,8 @@
 //!
 //! Lock discipline: every function that touches the core state machines takes a
 //! `&mut Core` (or is invoked while the caller already holds the core lock).
-//! Firmware callbacks enter through [`try_with_core`]; the tone action enters
-//! through the blocking [`with_core`]. No transport function ever re-locks.
+//! Firmware callbacks and timer-dispatched actions enter the core through
+//! [`try_with_core`]. No transport function ever re-locks.
 
 use core::sync::atomic::Ordering;
 
@@ -23,6 +23,8 @@ use super::{audio_device, audio_stream, bluetooth};
 
 const MEDIA_TIMER_EVENT: u8 = 9;
 const MEDIA_TIMER_TAG: &[u8] = b"A2DPM\0";
+const DISCONNECT_TIMER_EVENT: u8 = 11;
+const TONE_TIMER_EVENT: u8 = 12;
 const CALLBACK_RETRY_TAG: &[u8] = b"A2DPR\0";
 const CALLBACK_RETRY_DELAY_MS: u32 = 5;
 
@@ -64,20 +66,11 @@ pub fn schedule_initialize() -> Result<(), i32> {
         unsafe { bt_free(token as *mut core::ffi::c_void) };
         return Err(ERR_STATE);
     }
-    let queued = unsafe {
-        bt_queue_external(
-            owner,
-            sdp_work,
-            bt_queue_free_addr(),
-            token as *mut core::ffi::c_void,
-            1,
-        )
-    };
-    if queued.is_null() {
-        unsafe { bt_free(token.cast()) };
-        r.last_error.store(ERR_SDP, Ordering::Release);
-        r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
-        return Err(ERR_SDP);
+    unsafe {
+        // Activation runs outside the Bluetooth owner. External-event insertion
+        // is the stock cross-thread path: it holds the FSM lock and wakes the
+        // sleeping worker when the ring was previously empty.
+        let _ = bt_queue_external(owner, sdp_work, bt_queue_free_addr(), token.cast(), 1);
     }
     Ok(())
 }
@@ -250,7 +243,87 @@ pub fn bond_failed(address: [u8; 6], error: i32) {
     }
 }
 
+extern "C" fn disconnect_work(
+    _owner_valid: i32,
+    event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    if argument.is_null() {
+        return 0;
+    }
+    let generation = unsafe { argument.cast::<u32>().read() };
+    unsafe { bt_free(argument) };
+    let r = runtime();
+    if event != DISCONNECT_TIMER_EVENT as i32 || generation != r.generation {
+        return 0;
+    }
+    if let Err(error) = disconnect_owned() {
+        r.last_error.store(error, Ordering::Release);
+        let _ = try_with_core(|core| {
+            if core.controller.model.connection
+                == canopus_bluetooth_audio_core::ConnectionState::Disconnecting
+            {
+                core.controller.model.connection =
+                    canopus_bluetooth_audio_core::ConnectionState::Ready;
+                core.controller.model.touch();
+            }
+        });
+    }
+    0
+}
+
+/// Dispatches teardown through the stock external-event ring, which signals the
+/// Bluetooth FSM instead of waiting for unrelated radio traffic.
 pub fn disconnect() -> Result<(), i32> {
+    let r = runtime();
+    let state = r.transport_state.load(Ordering::Acquire);
+    if state != TRANSPORT_WAIT_BOND
+        && ((state != TRANSPORT_CONNECTING && state != TRANSPORT_CONNECTED)
+            || r.signaling_cid.load(Ordering::Acquire) <= 0x3f)
+    {
+        return Err(ERR_STATE);
+    }
+    let owner = unsafe { bt_l2cap_owner() };
+    if owner.is_null() {
+        return Err(ERR_STATE);
+    }
+    let token = unsafe { bt_alloc(core::mem::size_of::<u32>() as u32) } as *mut u32;
+    if token.is_null() {
+        return Err(ERR_ALLOC);
+    }
+    unsafe { token.write(r.generation) };
+    unsafe {
+        let _ = bt_queue_external(
+            owner,
+            disconnect_work,
+            bt_queue_free_addr(),
+            token.cast(),
+            DISCONNECT_TIMER_EVENT,
+        );
+    }
+    Ok(())
+}
+
+fn submit_signaling_disconnect() -> Result<(), i32> {
+    let r = runtime();
+    if r.transport_state.load(Ordering::Acquire) != TRANSPORT_DISCONNECTING
+        || r.signaling_cid.load(Ordering::Acquire) <= 0x3f
+    {
+        return Err(ERR_STATE);
+    }
+    let request = unsafe { bt_alloc(4) } as *mut DisconnectRequest;
+    if request.is_null() {
+        return Err(ERR_ALLOC);
+    }
+    unsafe {
+        (*request).private_cid = r.signaling_cid.load(Ordering::Acquire) as u16;
+        (*request).caller_tag = 0;
+        bt_l2cap_disconnect(request);
+    }
+    Ok(())
+}
+
+fn disconnect_owned() -> Result<(), i32> {
     let r = runtime();
     let state = r.transport_state.load(Ordering::Acquire);
     if state == TRANSPORT_WAIT_BOND {
@@ -275,18 +348,6 @@ pub fn disconnect() -> Result<(), i32> {
     {
         return Err(ERR_STATE);
     }
-    let media_state = r.media_state.load(Ordering::Acquire);
-    if r.media_cid.load(Ordering::Acquire) > 0x3f && media_state != MEDIA_DISCONNECTING {
-        media_disconnect()?;
-    }
-    let request = unsafe { bt_alloc(4) } as *mut DisconnectRequest;
-    if request.is_null() {
-        return Err(ERR_ALLOC);
-    }
-    unsafe {
-        (*request).private_cid = r.signaling_cid.load(Ordering::Acquire) as u16;
-        (*request).caller_tag = 0;
-    }
     if r.transport_state
         .compare_exchange(
             state,
@@ -296,10 +357,25 @@ pub fn disconnect() -> Result<(), i32> {
         )
         .is_err()
     {
-        unsafe { bt_free(request as *mut core::ffi::c_void) };
-        return Err(ERR_STATE);
+        return Err(ERRNO_EBUSY);
     }
-    unsafe { bt_l2cap_disconnect(request) };
+
+    // Disconnect the media channel first. Avoid asking this firmware to process
+    // two L2CAP disconnect requests concurrently; the previous overlap could
+    // leave one request waiting on the stack's long teardown path. The media
+    // completion callback submits signaling teardown immediately afterward.
+    let media_state = r.media_state.load(Ordering::Acquire);
+    if r.media_cid.load(Ordering::Acquire) > 0x3f && media_state != MEDIA_DISCONNECTING {
+        if let Err(error) = media_disconnect() {
+            r.transport_state.store(state, Ordering::Release);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    if let Err(error) = submit_signaling_disconnect() {
+        r.transport_state.store(state, Ordering::Release);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -873,6 +949,12 @@ fn media_l2cap_callback_impl(
                     Ordering::Release,
                 );
                 r.media_state.store(MEDIA_IDLE, Ordering::Release);
+                if r.transport_state.load(Ordering::Acquire) == TRANSPORT_DISCONNECTING
+                    && r.signaling_cid.load(Ordering::Acquire) > 0x3f
+                    && let Err(error) = submit_signaling_disconnect()
+                {
+                    return error;
+                }
                 0
             }
             _ => ERR_MEDIA_STATE,
@@ -1031,6 +1113,54 @@ pub fn audio_failed(_generation: u32) {
 // ---------------------------------------------------------------------------
 // Test tone
 // ---------------------------------------------------------------------------
+
+extern "C" fn tone_work(_owner_valid: i32, event: i32, argument: *mut core::ffi::c_void) -> i32 {
+    if argument.is_null() {
+        return 0;
+    }
+    let generation = unsafe { argument.cast::<u32>().read() };
+    unsafe { bt_free(argument) };
+    let r = runtime();
+    if event != TONE_TIMER_EVENT as i32 || generation != r.generation {
+        return 0;
+    }
+    match try_with_core(|core| {
+        let result = play_tone(core);
+        if result.is_err() && core.controller.model.stream == StreamState::Starting {
+            core.controller.model.stream = StreamState::Open;
+            core.controller.model.touch();
+        }
+        result
+    }) {
+        Some(Ok(())) => r.last_error.store(0, Ordering::Release),
+        Some(Err(error)) => r.last_error.store(error, Ordering::Release),
+        None => r.last_error.store(ERRNO_EBUSY, Ordering::Release),
+    }
+    0
+}
+
+pub fn schedule_play_tone() -> Result<(), i32> {
+    let r = runtime();
+    let owner = unsafe { bt_l2cap_owner() };
+    if owner.is_null() {
+        return Err(ERR_STATE);
+    }
+    let token = unsafe { bt_alloc(core::mem::size_of::<u32>() as u32) } as *mut u32;
+    if token.is_null() {
+        return Err(ERR_ALLOC);
+    }
+    unsafe { token.write(r.generation) };
+    unsafe {
+        let _ = bt_queue_external(
+            owner,
+            tone_work,
+            bt_queue_free_addr(),
+            token.cast(),
+            TONE_TIMER_EVENT,
+        );
+    }
+    Ok(())
+}
 
 /// Starts immediately when the media channel is live, or reconnects a media
 /// channel that the peer closed after the previous tone. After the first

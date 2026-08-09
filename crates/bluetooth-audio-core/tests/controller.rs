@@ -1,5 +1,5 @@
 use canopus_bluetooth_audio_core::{
-    Address, ConnectionState, Controller, DiscoveredDevice, Platform,
+    Address, ConnectionState, Controller, DiscoveredDevice, Peer, Platform,
 };
 
 #[derive(Default)]
@@ -7,6 +7,7 @@ struct Fake {
     calls: [u8; 8],
     len: usize,
     removal_pending: bool,
+    fail_disconnect: bool,
 }
 impl Fake {
     fn push(&mut self, value: u8) {
@@ -38,7 +39,11 @@ impl Platform for Fake {
     }
     fn disconnect_avdtp(&mut self, _: Address) -> Result<(), Self::Error> {
         self.push(6);
-        Ok(())
+        if self.fail_disconnect {
+            Err(())
+        } else {
+            Ok(())
+        }
     }
     fn play_test_tone(&mut self) -> Result<(), Self::Error> {
         self.push(7);
@@ -84,6 +89,26 @@ fn retained_bond_waits_for_removal_before_fresh_pair() {
     assert_eq!(&c.platform().calls[..2], &[3, 4]);
     c.bond_complete(result().address, true).unwrap();
     assert_eq!(&c.platform().calls[..3], &[3, 4, 5]);
+}
+
+#[test]
+fn disconnect_failure_restores_ready_state() {
+    let mut c = Controller::new(Fake {
+        fail_disconnect: true,
+        ..Default::default()
+    });
+    let peer = Peer {
+        address: result().address,
+        ..Default::default()
+    };
+    c.model.selected = Some(peer);
+    c.connected(peer.address);
+    c.stream_ready();
+
+    assert!(c.disconnect().is_err());
+    assert_eq!(c.model.connection, ConnectionState::Ready);
+    assert_eq!(c.model.connected, Some(peer));
+    assert_eq!(&c.platform().calls[..1], &[6]);
 }
 
 #[test]

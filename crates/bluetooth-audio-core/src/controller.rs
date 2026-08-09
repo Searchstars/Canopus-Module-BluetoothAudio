@@ -207,7 +207,14 @@ impl<P: Platform> Controller<P> {
         };
         self.model.connection = ConnectionState::Disconnecting;
         self.model.touch();
-        self.platform.disconnect_avdtp(peer.address)
+        match self.platform.disconnect_avdtp(peer.address) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.model.connection = ConnectionState::Ready;
+                self.model.touch();
+                Err(error)
+            }
+        }
     }
 
     pub fn disconnected(&mut self, address: Address) {
