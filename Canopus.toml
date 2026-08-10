@@ -8,7 +8,11 @@ lifecycle = "resident-after-activation"
 canopus_abi = "1"
 
 [targets]
-include = ["xiaomi-band-10-pro-3.101.030"]
+include = [
+  "xiaomi-band-10-pro-3.101.030",
+  "xiaomi-band-10-pro-3.101.036",
+  "xiaomi-band-9-pro-3.1.175",
+]
 
 [capabilities]
 # These are the product requirements. The current public target pack exposes

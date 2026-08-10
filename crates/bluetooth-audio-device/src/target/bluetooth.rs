@@ -748,6 +748,9 @@ unsafe extern "C" fn on_discovery_result(
     let device = DiscoveredDevice {
         address: Address(unsafe { (*result).address }),
         name: DeviceName::from_bytes(name),
+        #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
+        rssi: unsafe { (*result).rssi },
+        #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
         rssi: unsafe { (*result).rssi } as i32,
         class_of_device: unsafe { (*result).class_of_device },
         last_seen_epoch: 0,

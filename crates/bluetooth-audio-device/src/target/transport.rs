@@ -45,61 +45,36 @@ pub fn schedule_initialize() -> Result<(), i32> {
     if r.transport_state.load(Ordering::Acquire) != TRANSPORT_DORMANT {
         return Err(ERR_STATE);
     }
-    #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-    {
-        // Band-9 firmware (Band 9 Pro 3.1.175) has no AVDTP Source profile:
-        // no SDP service registration (only a client-side discovery API) and no
-        // classic L2CAP host API. Mark the transport ready without SDP so the
-        // module can deploy and run discovery/pairing/UI; a media connect then
-        // fails clearly at submit time instead of hanging activation.
-        if r.transport_state
-            .compare_exchange(
-                TRANSPORT_DORMANT,
-                TRANSPORT_READY,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return Err(ERR_STATE);
-        }
-        r.sdp_registered.store(1, Ordering::Release);
-        Ok(())
+    let owner = unsafe { bt_l2cap_owner() };
+    if owner.is_null() {
+        return Err(ERR_STATE);
     }
-    #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
-    {
-        let owner = unsafe { bt_l2cap_owner() };
-        if owner.is_null() {
-            return Err(ERR_STATE);
-        }
-        let token = unsafe { bt_alloc(4) } as *mut u32;
-        if token.is_null() {
-            return Err(ERR_ALLOC);
-        }
-        unsafe { token.write(r.generation) };
-        if r.transport_state
-            .compare_exchange(
-                TRANSPORT_DORMANT,
-                TRANSPORT_INITIALIZING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            unsafe { bt_free(token as *mut core::ffi::c_void) };
-            return Err(ERR_STATE);
-        }
-        unsafe {
-            // Activation runs outside the Bluetooth owner. External-event insertion
-            // is the stock cross-thread path: it holds the FSM lock and wakes the
-            // sleeping worker when the ring was previously empty.
-            let _ = bt_queue_external(owner, sdp_work, bt_queue_free_addr(), token.cast(), 1);
-        }
-        Ok(())
+    let token = unsafe { bt_alloc(4) } as *mut u32;
+    if token.is_null() {
+        return Err(ERR_ALLOC);
     }
+    unsafe { token.write(r.generation) };
+    if r.transport_state
+        .compare_exchange(
+            TRANSPORT_DORMANT,
+            TRANSPORT_INITIALIZING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        unsafe { bt_free(token as *mut core::ffi::c_void) };
+        return Err(ERR_STATE);
+    }
+    unsafe {
+        // Activation runs outside the Bluetooth owner. External-event insertion
+        // is the stock cross-thread path: it holds the FSM lock and wakes the
+        // sleeping worker when the ring was previously empty.
+        let _ = bt_queue_external(owner, sdp_work, bt_queue_free_addr(), token.cast(), 1);
+    }
+    Ok(())
 }
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 extern "C" fn sdp_work(_unused: i32, event: i32, argument: *mut core::ffi::c_void) -> i32 {
     let r = runtime();
     if argument.is_null() {

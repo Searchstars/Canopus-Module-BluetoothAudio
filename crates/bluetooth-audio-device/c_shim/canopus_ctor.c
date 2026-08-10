@@ -9,6 +9,18 @@ __attribute__((section(".rodata"), used, aligned(4)))
 const uint8_t canopus_rodata_anchor[4] = {0};
 __attribute__((section(".rodata.cst16"), used, aligned(16)))
 const uint8_t canopus_rodata_cst16_anchor[16] = {0};
+__attribute__((section(".rodata.analysis_consts_fixed4_simd_odd"), used,
+               aligned(4)))
+const uint8_t canopus_analysis_consts_fixed4_simd_odd_anchor[4] = {0};
+__attribute__((section(".rodata.analysis_consts_fixed4_simd_even"), used,
+               aligned(4)))
+const uint8_t canopus_analysis_consts_fixed4_simd_even_anchor[4] = {0};
+__attribute__((section(".rodata.analysis_consts_fixed8_simd_odd"), used,
+               aligned(4)))
+const uint8_t canopus_analysis_consts_fixed8_simd_odd_anchor[4] = {0};
+__attribute__((section(".rodata.analysis_consts_fixed8_simd_even"), used,
+               aligned(4)))
+const uint8_t canopus_analysis_consts_fixed8_simd_even_anchor[4] = {0};
 
 extern void canopus_decode_opaque_words(void) __attribute__((weak));
 

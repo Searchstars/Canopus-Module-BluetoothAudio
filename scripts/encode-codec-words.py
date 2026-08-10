@@ -18,6 +18,18 @@ MASK = 0xA5A5A5A5
 ANCHORS = {
     ".rodata": "canopus_rodata_anchor",
     ".rodata.cst16": "canopus_rodata_cst16_anchor",
+    ".rodata.analysis_consts_fixed4_simd_odd": (
+        "canopus_analysis_consts_fixed4_simd_odd_anchor"
+    ),
+    ".rodata.analysis_consts_fixed4_simd_even": (
+        "canopus_analysis_consts_fixed4_simd_even_anchor"
+    ),
+    ".rodata.analysis_consts_fixed8_simd_odd": (
+        "canopus_analysis_consts_fixed8_simd_odd_anchor"
+    ),
+    ".rodata.analysis_consts_fixed8_simd_even": (
+        "canopus_analysis_consts_fixed8_simd_even_anchor"
+    ),
 }
 
 
