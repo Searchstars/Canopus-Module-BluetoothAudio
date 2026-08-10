@@ -117,6 +117,7 @@ impl Platform for DevicePlatform {
 
     fn start_discovery(&mut self, timeout_seconds: u8) -> Result<(), i32> {
         compatibility::install()?;
+        transport::schedule_initialize_if_ready()?;
         let r = runtime();
         r.scan_epoch.fetch_add(1, Ordering::AcqRel);
         let adapter = adapter();
@@ -358,6 +359,10 @@ fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
     Ok(true)
 }
 
+pub fn adapter_is_on() -> bool {
+    flag(FLAG_ADAPTER_ON)
+}
+
 /// Registers the adapter client and publishes the persistent callback table.
 pub fn register() -> Result<(), i32> {
     let r = runtime();
@@ -368,7 +373,7 @@ pub fn register() -> Result<(), i32> {
     if adapter.is_null() {
         r.registration_state
             .store(REGISTRATION_FAILED, Ordering::Release);
-        return Err(ERR_STATE);
+        return Err(ERR_ADAPTER_UNAVAILABLE);
     }
     r.adapter.store(adapter as usize, Ordering::Release);
     let callbacks = callbacks_ptr();
@@ -385,7 +390,7 @@ pub fn register() -> Result<(), i32> {
     if handle == 0 {
         r.registration_state
             .store(REGISTRATION_FAILED, Ordering::Release);
-        return Err(ERR_STATE);
+        return Err(ERR_ADAPTER_REGISTER);
     }
     r.registration_state
         .store(REGISTRATION_COMPLETE, Ordering::Release);
@@ -394,6 +399,8 @@ pub fn register() -> Result<(), i32> {
     r.adapter_state.store(state, Ordering::Release);
     if state == ADAPTER_STATE_ON {
         flag_set(FLAG_ADAPTER_ON, 0);
+    } else {
+        flag_set(0, FLAG_ADAPTER_ON);
     }
     Ok(())
 }
@@ -687,9 +694,12 @@ unsafe extern "C" fn on_adapter_state(_cookie: *mut core::ffi::c_void, state: i3
     if state == ADAPTER_STATE_ON {
         flag_set(FLAG_ADAPTER_ON, 0);
         // Bluetooth power-on reconstructs the writable GAP transport vtable.
-        // Reassert the compare-before-write hook at the authoritative ON
-        // transition and again before each connection flow.
+        // Reassert the compare-before-write hook before owner-thread work and
+        // again before each connection flow.
         if let Err(error) = compatibility::install() {
+            r.last_error.store(error, Ordering::Release);
+        }
+        if let Err(error) = transport::schedule_initialize_if_ready() {
             r.last_error.store(error, Ordering::Release);
         }
     } else {

@@ -6,6 +6,8 @@ const MAGIC: u32 = 0x4241_5531; // "BAU1"
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static RESIDENT: AtomicBool = AtomicBool::new(false);
 static LAST_ERROR: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "device")]
+static LOAD_GENERATION: AtomicU32 = AtomicU32::new(0);
 
 const fn pack<const N: usize>(value: &[u8]) -> [u8; N] {
     let mut out = [0; N];
@@ -41,7 +43,17 @@ pub extern "C" fn canopus_mod_prepare(_ctx: *const ContextV1) -> i32 {
     RESIDENT.store(false, Ordering::Release);
     LAST_ERROR.store(0, Ordering::Release);
     #[cfg(feature = "device")]
-    crate::target::prepare(1);
+    {
+        let mut generation = LOAD_GENERATION
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        if generation == 0 {
+            generation = LOAD_GENERATION
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1);
+        }
+        crate::target::prepare(generation);
+    }
     0
 }
 

@@ -10,7 +10,10 @@
 //!
 //!   1. identity guard against the exact firmware,
 //!   2. adapter callback registration,
-//!   3. SDP source registration (queued on the Bluetooth owner thread).
+//!   3. SDP source registration when the Bluetooth owner becomes ready.
+//!
+//! Loading while Bluetooth is OFF is valid. The adapter ON callback performs
+//! idempotent transport scheduling and GAP compatibility installation.
 //!
 //! Native app and Launcher registration are deliberately not part of module
 //! activation. `app_install` mutates miwear's process-local app/page registry;
@@ -73,17 +76,21 @@ pub fn activate() -> i32 {
         runtime().last_error.store(error, Ordering::Release);
         return error;
     }
-    if let Err(error) = transport::schedule_initialize() {
-        runtime().last_error.store(error, Ordering::Release);
-        return error;
-    }
-    // Once the writable HCI callback points into this module, code must stay
-    // resident even if a later optional service publication fails.
-    if let Err(error) = compatibility::install() {
-        runtime().last_error.store(error, Ordering::Release);
-        return error;
-    }
+    // Adapter callbacks outlive activation, so unload is unsafe from this point
+    // even while Bluetooth is OFF and transport initialization remains deferred.
     runtime().resident.store(true, Ordering::Release);
+    if bluetooth::adapter_is_on() {
+        if let Err(error) = transport::schedule_initialize_if_ready() {
+            runtime().last_error.store(error, Ordering::Release);
+            return error;
+        }
+        // The ON callback and every connection operation retry hook install. A
+        // freshly powered stack may report ON before it has populated the slot,
+        // so this first attempt is diagnostic rather than an activation gate.
+        if let Err(error) = compatibility::install() {
+            runtime().last_error.store(error, Ordering::Release);
+        }
+    }
     if let Err(error) = audio_device::register() {
         runtime().last_error.store(error, Ordering::Release);
         return error;
