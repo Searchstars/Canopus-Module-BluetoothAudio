@@ -13,6 +13,7 @@ use super::transport;
 
 pub struct DevicePlatform;
 
+#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 const ERR_CORE_POLICY: i32 = -1107;
 const BOND_TIMER_EVENT: u8 = 11;
 const BOND_TIMER_REMOVE: u8 = 1;
@@ -29,8 +30,18 @@ struct BondTimerToken {
     reserved: [u8; 3],
 }
 
+#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 type PairRequestCallback = extern "C" fn(*mut core::ffi::c_void, *const u8);
 
+/// Band-9 Bluelet has no band-10 `core_bt_*` callback-table interception; the
+/// stock btm_gap flow drives pairing without a request filter, so the filter
+/// installation is a no-op.
+#[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
+fn install_core_pair_filter(_address: [u8; 6]) -> Result<(), i32> {
+    Ok(())
+}
+
+#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 extern "C" fn core_pair_request_filter(cookie: *mut core::ffi::c_void, address: *const u8) {
     let addr = address_from_ptr(address);
     if !address.is_null() && flag(FLAG_BOND_PENDING) && target_matches(addr) {
@@ -42,6 +53,7 @@ extern "C" fn core_pair_request_filter(cookie: *mut core::ffi::c_void, address: 
     original(cookie, address);
 }
 
+#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 fn install_core_pair_filter(address: [u8; 6]) -> Result<(), i32> {
     let r = runtime();
     if unsafe { core_bt_bind_state() } != CORE_BT_BOUND_STATE {

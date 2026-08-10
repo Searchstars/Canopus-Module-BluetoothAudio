@@ -9,11 +9,14 @@ use core::{
 use canopus_bluetooth_audio_core::audio_input::{
     ABI_VERSION, AudioInput, FormatV1, InputError, StatusV1,
 };
-use canopus_target_private::{bt_alloc, bt_free, canopus_fw_register_driver, file_operations};
+#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+use canopus_target_private::canopus_fw_register_driver;
+use canopus_target_private::{bt_alloc, bt_free, file_operations};
 
 use super::audio_stream;
 
 const DEVICE_PATH: &[u8] = b"/dev/canopus_audio\0";
+#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 const DEVICE_MODE: u32 = 0o666;
 pub const INPUT_CAPACITY: usize = 16 * 1024;
 
@@ -67,6 +70,17 @@ pub fn register() -> Result<(), i32> {
     // SAFETY: activation is single-threaded and this resident table is written
     // once before register_driver publishes its address.
     unsafe { operations_ptr.write(operations) };
+    #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
+    let result = unsafe {
+        // Band-9 register_driver is 3-arg (no mode_t); the driver is registered
+        // on the band-9 NuttX variant with a NULL private argument.
+        canopus_target_private::canopus_fw_register_driver_b9(
+            DEVICE_PATH.as_ptr(),
+            operations_ptr.cast(),
+            core::ptr::null_mut(),
+        )
+    };
+    #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
     let result = unsafe {
         canopus_fw_register_driver(
             DEVICE_PATH.as_ptr(),
