@@ -39,40 +39,50 @@ struct MediaRetryToken {
 // SDP registration
 // ---------------------------------------------------------------------------
 
-/// Queues SDP registration on the Bluetooth owner thread.
-pub fn schedule_initialize() -> Result<(), i32> {
+/// Queues SDP registration once the Bluetooth owner exists. A null owner is a
+/// transient power-state condition: the adapter ON callback or the next user
+/// operation retries without making module activation fail.
+pub fn schedule_initialize_if_ready() -> Result<bool, i32> {
     let r = runtime();
-    if r.transport_state.load(Ordering::Acquire) != TRANSPORT_DORMANT {
-        return Err(ERR_STATE);
+    if !flag(FLAG_ADAPTER_ON) {
+        return Ok(false);
+    }
+    match r.transport_state.load(Ordering::Acquire) {
+        TRANSPORT_INITIALIZING | TRANSPORT_READY => return Ok(false),
+        TRANSPORT_DORMANT => {}
+        _ => return Err(ERR_TRANSPORT_STATE),
     }
     let owner = unsafe { bt_l2cap_owner() };
     if owner.is_null() {
-        return Err(ERR_STATE);
+        return Ok(false);
     }
     let token = unsafe { bt_alloc(4) } as *mut u32;
     if token.is_null() {
         return Err(ERR_ALLOC);
     }
     unsafe { token.write(r.generation) };
-    if r.transport_state
-        .compare_exchange(
-            TRANSPORT_DORMANT,
-            TRANSPORT_INITIALIZING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .is_err()
-    {
-        unsafe { bt_free(token as *mut core::ffi::c_void) };
-        return Err(ERR_STATE);
+    match r.transport_state.compare_exchange(
+        TRANSPORT_DORMANT,
+        TRANSPORT_INITIALIZING,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => {}
+        Err(TRANSPORT_INITIALIZING | TRANSPORT_READY) => {
+            unsafe { bt_free(token.cast()) };
+            return Ok(false);
+        }
+        Err(_) => {
+            unsafe { bt_free(token.cast()) };
+            return Err(ERR_TRANSPORT_STATE);
+        }
     }
     unsafe {
-        // Activation runs outside the Bluetooth owner. External-event insertion
-        // is the stock cross-thread path: it holds the FSM lock and wakes the
-        // sleeping worker when the ring was previously empty.
+        // The return is the firmware lock-release result, not queue acceptance.
+        // With a live owner, stock callers treat external insertion as infallible.
         let _ = bt_queue_external(owner, sdp_work, bt_queue_free_addr(), token.cast(), 1);
     }
-    Ok(())
+    Ok(true)
 }
 
 extern "C" fn sdp_work(_unused: i32, event: i32, argument: *mut core::ffi::c_void) -> i32 {
@@ -83,12 +93,24 @@ extern "C" fn sdp_work(_unused: i32, event: i32, argument: *mut core::ffi::c_voi
         return 0;
     }
     let token = argument as *const u32;
-    let valid = event == 1
-        && r.transport_state.load(Ordering::Acquire) == TRANSPORT_INITIALIZING
-        && unsafe { token.read() } == r.generation;
-    if !valid {
+    let generation = unsafe { token.read() };
+    if generation != r.generation {
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    if event != 1 || r.transport_state.load(Ordering::Acquire) != TRANSPORT_INITIALIZING {
         r.last_error.store(ERR_SDP, Ordering::Release);
         r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    if !flag(FLAG_ADAPTER_ON) {
+        let _ = r.transport_state.compare_exchange(
+            TRANSPORT_INITIALIZING,
+            TRANSPORT_DORMANT,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         unsafe { bt_free(argument) };
         return 0;
     }
