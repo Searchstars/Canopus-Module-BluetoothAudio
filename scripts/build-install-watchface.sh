@@ -18,6 +18,21 @@ TARGET_PROFILE="$ROOT/targets/$TARGET_ID.env"
   exit 1
 }
 . "$TARGET_PROFILE"
+TARGET_FIRMWARE_SHA256=$(python3 - "$CANOPUS/targets/$TARGET_ID/target.toml" "$TARGET_ID" <<'PY'
+import pathlib, sys, tomllib
+profile = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+if profile.get("target_id") != sys.argv[2]:
+    raise SystemExit("target profile identity does not match CANOPUS_TARGET")
+digest = profile.get("firmware_sha256", "")
+if len(digest) != 64:
+    raise SystemExit("target profile has no valid firmware_sha256")
+try:
+    bytes.fromhex(digest)
+except ValueError as error:
+    raise SystemExit("target profile firmware_sha256 is not hexadecimal") from error
+print(digest)
+PY
+)
 OUT=${CANOPUS_BUILD_OUT:-"$ROOT/build/$TARGET_ID"}
 WATCHFACE="$ROOT/watchfaces/bluetooth-audio"
 TRIPLE=$RUST_TARGET_TRIPLE
@@ -87,6 +102,8 @@ python3 "$CANOPUS/scripts/build-module-installer-receipt.py" \
   --module-id "$TOKEN" \
   --version 1 \
   --lifecycle "$LIFECYCLE" \
+  --target-id "$TARGET_ID" \
+  --firmware-sha256 "$TARGET_FIRMWARE_SHA256" \
   --private-key "$KEY" \
   --output "$OUT/receipt.bin"
 
@@ -106,7 +123,7 @@ PY
 lua "$ROOT/scripts/smoke-watchface.lua" "$WATCHFACE/main.lua" >/dev/null
 cp "$OUT/bluetooth-audio.elf" "$WATCHFACE/module.bin"
 cp "$OUT/receipt.bin" "$WATCHFACE/receipt.bin"
-python3 - "$WATCHFACE" "$LIFECYCLE" <<'EOF'
+python3 - "$WATCHFACE" "$LIFECYCLE" "$TARGET_ID" "$TARGET_FIRMWARE_SHA256" <<'EOF'
 import hashlib, pathlib, struct, sys
 watchface = pathlib.Path(sys.argv[1])
 expected_lifecycle = int(sys.argv[2])
@@ -128,7 +145,11 @@ actual = receipt[144:176]
 assert actual == expected, (actual.hex(), expected.hex())
 name = receipt[32:64].split(b"\0", 1)[0]
 assert name == b"bluetooth_audio", name
-print(f"watchface staged OK: module={len(module)}B receipt={len(receipt)}B "
+target_id = receipt[64:112].split(b"\0", 1)[0].decode("ascii")
+firmware_sha256 = receipt[112:144].hex()
+assert target_id == sys.argv[3], (target_id, sys.argv[3])
+assert firmware_sha256 == sys.argv[4], (firmware_sha256, sys.argv[4])
+print(f"watchface staged OK: target={target_id} module={len(module)}B receipt={len(receipt)}B "
       f"long_audio={len(long_audio)}B stream={len(long_audio_stream)}B sha256={expected.hex()}")
 EOF
 echo "watchfaces/bluetooth-audio is ready to install"
