@@ -27,6 +27,10 @@ const DISCONNECT_TIMER_EVENT: u8 = 11;
 const TONE_TIMER_EVENT: u8 = 12;
 const CALLBACK_RETRY_TAG: &[u8] = b"A2DPR\0";
 const CALLBACK_RETRY_DELAY_MS: u32 = 5;
+/// Keep at most two media SDUs inside the stock L2CAP queue. Queue acceptance
+/// transfers buffer ownership but is not proof that the controller consumed it;
+/// event 8 releases one flow credit.
+const MAX_MEDIA_TX_OUTSTANDING: u32 = 2;
 
 #[repr(C)]
 struct MediaRetryToken {
@@ -451,12 +455,84 @@ fn send_media(sdu: &[u8]) -> i32 {
     0
 }
 
+pub(super) fn media_flow_available() -> bool {
+    runtime().media_tx_outstanding.load(Ordering::Acquire) < MAX_MEDIA_TX_OUTSTANDING
+}
+
+fn reserve_media_flow_credit() -> bool {
+    let outstanding = &runtime().media_tx_outstanding;
+    let mut current = outstanding.load(Ordering::Acquire);
+    loop {
+        if current >= MAX_MEDIA_TX_OUTSTANDING {
+            return false;
+        }
+        match outstanding.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn return_media_flow_credit() {
+    let outstanding = &runtime().media_tx_outstanding;
+    let mut current = outstanding.load(Ordering::Acquire);
+    while current != 0 {
+        match outstanding.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn release_media_flow_credit() {
+    let r = runtime();
+    let mut outstanding = r.media_tx_outstanding.load(Ordering::Acquire);
+    while outstanding != 0 {
+        match r.media_tx_outstanding.compare_exchange_weak(
+            outstanding,
+            outstanding - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                r.media_packets_completed.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+            Err(current) => outstanding = current,
+        }
+    }
+}
+
 pub(super) fn reset_audio_media_flow() {
-    runtime().media_tx_outstanding.store(0, Ordering::Release);
+    let r = runtime();
+    r.media_tx_outstanding.store(0, Ordering::Release);
+    r.media_packets_queued.store(0, Ordering::Release);
+    r.media_packets_completed.store(0, Ordering::Release);
+    r.media_startup_silence_queued.store(0, Ordering::Release);
 }
 
 pub(super) fn send_audio_media(sdu: &[u8]) -> i32 {
-    send_media(sdu)
+    let r = runtime();
+    if !reserve_media_flow_credit() {
+        return ERRNO_EBUSY;
+    }
+    let result = send_media(sdu);
+    if result == 0 {
+        r.media_packets_queued.fetch_add(1, Ordering::Relaxed);
+    } else {
+        return_media_flow_credit();
+    }
+    result
 }
 
 /// Maps the AVDTP source state into the UI model's stream state.
@@ -953,7 +1029,12 @@ fn media_l2cap_callback_impl(
                 }
                 0
             }
-            EVENT_CHANNEL_STATUS_4 | EVENT_CHANNEL_STATUS_5 | EVENT_DATA | EVENT_FLOW_STATUS => 0,
+            EVENT_CHANNEL_STATUS_4 | EVENT_CHANNEL_STATUS_5 | EVENT_DATA => 0,
+            EVENT_FLOW_STATUS => {
+                release_media_flow_credit();
+                audio_stream::media_flow_credit();
+                0
+            }
             EVENT_DISCONNECTION_COMPLETE => {
                 let cid = unsafe { u16_at(packet, 0) };
                 let reason = unsafe { u16_at(packet, 2) };

@@ -207,6 +207,10 @@ fn sync_target_model(core: &mut Core) {
         startup_avdtp_ms,
     ) = audio_stream::diagnostic_timing();
     let audio_stage = audio_stream::diagnostic_stage() as u8;
+    let media_packets_queued = r.media_packets_queued.load(Ordering::Relaxed);
+    let media_flow_events = r.media_packets_completed.load(Ordering::Relaxed);
+    let media_tx_outstanding = r.media_tx_outstanding.load(Ordering::Acquire);
+    let startup_silence_packets = r.media_startup_silence_queued.load(Ordering::Relaxed);
     let bitpool = if audio.negotiated_bitpool != 0 {
         audio.negotiated_bitpool as u8
     } else {
@@ -227,6 +231,10 @@ fn sync_target_model(core: &mut Core) {
         || details.input_used != audio.input_used
         || details.pcm_frames != audio.pcm_frames
         || details.audio_rtp_packets != audio.rtp_packets
+        || details.media_packets_queued != media_packets_queued
+        || details.media_flow_events != media_flow_events
+        || details.media_tx_outstanding != media_tx_outstanding
+        || details.startup_silence_packets != startup_silence_packets
         || details.underruns != audio.underruns
         || details.audio_elapsed_ms != audio_elapsed_ms
         || details.decode_cpu_ms != decode_cpu_ms
@@ -244,6 +252,10 @@ fn sync_target_model(core: &mut Core) {
         details.input_used = audio.input_used;
         details.pcm_frames = audio.pcm_frames;
         details.audio_rtp_packets = audio.rtp_packets;
+        details.media_packets_queued = media_packets_queued;
+        details.media_flow_events = media_flow_events;
+        details.media_tx_outstanding = media_tx_outstanding;
+        details.startup_silence_packets = startup_silence_packets;
         details.underruns = audio.underruns;
         details.audio_elapsed_ms = audio_elapsed_ms;
         details.decode_cpu_ms = decode_cpu_ms;
@@ -285,7 +297,7 @@ pub fn rebuild(page_index: usize) -> i32 {
 /// The LVGL timer invoking this function belongs to the page owner thread, so
 /// applying the snapshot never crosses UI-thread ownership.
 pub fn rebuild_if_changed(page_index: usize, rendered_generation: u32) -> i32 {
-    let snapshot = with_core(|core| {
+    let snapshot = match try_with_core(|core| {
         sync_target_model(core);
         let model = &core.controller.model;
         if model.generation == rendered_generation {
@@ -300,7 +312,10 @@ pub fn rebuild_if_changed(page_index: usize, rendered_generation: u32) -> i32 {
             snap.generation = model.generation;
             snap
         }))
-    });
+    }) {
+        Some(snapshot) => snapshot,
+        None => return 0,
+    };
     match snapshot {
         None => 0,
         Some(Ok(snap)) => ui_backend::apply_snapshot(page_index, &snap),

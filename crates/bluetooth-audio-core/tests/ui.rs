@@ -76,6 +76,10 @@ fn detail_keeps_audio_diagnostics_topology_stable() {
     model.details.input_used = 3072;
     model.details.pcm_frames = 1058;
     model.details.audio_rtp_packets = 2;
+    model.details.media_packets_queued = 5;
+    model.details.media_flow_events = 3;
+    model.details.media_tx_outstanding = 2;
+    model.details.startup_silence_packets = 3;
     model.details.underruns = 1;
     model.details.audio_error = -1206;
     let after = ui::detail(&model).unwrap();
@@ -96,6 +100,10 @@ fn detail_keeps_audio_diagnostics_topology_stable() {
     );
     assert_eq!(after.secondary(after.find_by_key(40).unwrap()), "1058");
     assert_eq!(after.secondary(after.find_by_key(41).unwrap()), "2");
+    assert_eq!(
+        after.secondary(after.find_by_key(49).unwrap()),
+        "q5 f3 out2 pre3"
+    );
     assert_eq!(after.secondary(after.find_by_key(42).unwrap()), "1");
     assert_eq!(after.secondary(after.find_by_key(43).unwrap()), "-1206");
 }

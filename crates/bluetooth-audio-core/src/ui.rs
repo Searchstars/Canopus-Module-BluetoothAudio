@@ -143,6 +143,16 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.status_row(40, "PCM frames", pcm_frames.as_str())?;
     let audio_packets = unsigned(model.details.audio_rtp_packets);
     tree.status_row(41, "MP3 RTP", audio_packets.as_str())?;
+    let mut media_flow = FixedText::<48>::default();
+    let _ = write!(
+        media_flow,
+        "q{} f{} out{} pre{}",
+        model.details.media_packets_queued,
+        model.details.media_flow_events,
+        model.details.media_tx_outstanding,
+        model.details.startup_silence_packets,
+    );
+    tree.status_row(49, "Media flow", media_flow.as_str())?;
     let underruns = unsigned(model.details.underruns);
     tree.status_row(42, "Underruns", underruns.as_str())?;
     let audio_error = number(model.details.audio_error);

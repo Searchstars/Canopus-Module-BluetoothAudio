@@ -80,6 +80,9 @@ fn packetizes_variable_length_stream_packets() {
     assert_eq!(p.sequence, 2);
     assert_eq!(p.timestamp, 640);
     assert!(matches!(p.next_delay_ms(5), 14 | 15));
+    assert_eq!(p.startup_packets(1_500), 11);
+    assert_eq!(p.startup_packets(0), 11);
+    assert_eq!(p.startup_packets(u16::MAX), 16);
 
     p.write_header(&mut packet, 2, false).unwrap();
     assert_eq!(packet[1], 96);
