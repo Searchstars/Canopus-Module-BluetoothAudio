@@ -99,6 +99,22 @@ impl StreamPacketizer {
         self.pace_remainder = timing % SAMPLE_RATE;
         delay
     }
+
+    /// Number of complete silent packets used to prime the sink before consuming
+    /// the first music sample. This uses the peer's Delay Report when available
+    /// and the same bounded fallback as the device-proven tone path.
+    pub fn startup_packets(&self, reported_delay_100us: u16) -> u8 {
+        let delay = if reported_delay_100us == 0 {
+            DEFAULT_SINK_DELAY_100US
+        } else {
+            reported_delay_100us
+        } as u32;
+        let packet_samples = self.frames_per_packet as u32 * FRAME_SAMPLES;
+        let packet_100us = (packet_samples * 10_000).div_ceil(SAMPLE_RATE).max(1);
+        delay
+            .div_ceil(packet_100us)
+            .clamp(1, MAX_STARTUP_PACKETS as u32) as u8
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

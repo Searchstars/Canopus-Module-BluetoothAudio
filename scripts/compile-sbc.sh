@@ -8,7 +8,7 @@ SBC="$ROOT/third_party/sbc"
 COMMON="--target=arm-none-eabi -mcpu=$CPU -mthumb -mfloat-abi=soft \
   -DCANOPUS_FREESTANDING=1 -ffreestanding -fno-common -fno-builtin \
   -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
-  -fdata-sections -ffunction-sections -Os -Wall -Wextra -I$SBC"
+  -fdata-sections -ffunction-sections -O3 -Wall -Wextra -I$SBC"
 
 # Intentional word splitting turns COMMON into compiler arguments.
 # shellcheck disable=SC2086

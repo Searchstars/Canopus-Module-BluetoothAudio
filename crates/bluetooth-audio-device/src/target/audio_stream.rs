@@ -42,11 +42,11 @@ const LONG_TEST_PREBUFFER: usize = MIN_DECODE_INPUT;
 const LONG_TEST_REFILL_LOW_WATER: usize = MIN_DECODE_INPUT;
 const LONG_TEST_REFILL_TARGET: usize = 4 * 1024;
 const DECODE_ONLY_STEP_DELAY_MS: u32 = 1;
-const STREAM_STARTUP_PACKETS: u8 = 8;
 const MAX_DECODED_PCM_FRAMES: usize = 1152;
 const PCM_FRAME_CAPACITY: usize =
     MAX_DECODED_PCM_FRAMES + MAX_FRAMES_PER_PACKET as usize * FRAME_SAMPLES as usize - 1;
 const PCM_SAMPLES: usize = 2 * PCM_FRAME_CAPACITY;
+const SILENCE_PCM: [i16; 256] = [0; 256];
 const LONG_TEST_AUDIO_PATH: &[u8] = b"/data/canopus/tmp_btaudio_module_long_audio_test.mp3\0";
 
 pub const AUDIO_STAGE_IDLE: u32 = 0;
@@ -92,6 +92,7 @@ struct Pipeline {
     marker: bool,
     next_packet_deadline_ms: u32,
     startup_packets_remaining: u8,
+    startup_complete: bool,
 }
 
 static PIPELINE: AtomicUsize = AtomicUsize::new(0);
@@ -192,6 +193,7 @@ fn allocate_pipeline() -> Result<(&'static mut Pipeline, bool), i32> {
         core::ptr::addr_of_mut!((*allocation).marker).write(true);
         core::ptr::addr_of_mut!((*allocation).next_packet_deadline_ms).write(0);
         core::ptr::addr_of_mut!((*allocation).startup_packets_remaining).write(0);
+        core::ptr::addr_of_mut!((*allocation).startup_complete).write(false);
     }
     match PIPELINE.compare_exchange(0, allocation as usize, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Ok((unsafe { &mut *allocation }, true)),
@@ -209,7 +211,14 @@ pub fn preallocate_pipeline() -> Result<(), i32> {
 }
 
 impl Pipeline {
-    fn begin(&mut self, generation: u32, mtu: u16, bitpool: u8, fresh: bool) -> Result<(), i32> {
+    fn begin(
+        &mut self,
+        generation: u32,
+        mtu: u16,
+        bitpool: u8,
+        reported_delay_100us: u16,
+        fresh: bool,
+    ) -> Result<(), i32> {
         if !fresh {
             self.stream.reset();
         }
@@ -224,12 +233,14 @@ impl Pipeline {
         self.encoder.write(encoder);
         self.encoder_ready = true;
         let packetizer = StreamPacketizer::new(mtu, bitpool).map_err(|_| ERR_AUDIO_CODEC)?;
+        let startup_packets = packetizer.startup_packets(reported_delay_100us);
         self.packetizer.write(packetizer);
         self.packetizer_ready = true;
         self.session_generation = generation;
         self.marker = true;
         self.next_packet_deadline_ms = 0;
-        self.startup_packets_remaining = STREAM_STARTUP_PACKETS;
+        self.startup_packets_remaining = startup_packets;
+        self.startup_complete = false;
         Ok(())
     }
 
@@ -244,6 +255,7 @@ impl Pipeline {
         self.marker = true;
         self.next_packet_deadline_ms = 0;
         self.startup_packets_remaining = 0;
+        self.startup_complete = false;
     }
 
     fn ready_for(&self, generation: u32) -> bool {
@@ -331,6 +343,15 @@ pub fn schedule_start() -> Result<(), i32> {
         return Err(error);
     }
     Ok(())
+}
+
+pub fn media_flow_credit() {
+    let generation = audio_device::input().generation();
+    if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
+        WAKE_RUNTIME_GENERATION.store(runtime().generation, Ordering::Release);
+        WAKE_AUDIO_GENERATION.store(generation, Ordering::Release);
+        let _ = schedule_wake();
+    }
 }
 
 pub fn schedule_wake() -> Result<(), i32> {
@@ -725,7 +746,11 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
     {
         pipeline.marker = true;
         pipeline.next_packet_deadline_ms = 0;
-        pipeline.startup_packets_remaining = STREAM_STARTUP_PACKETS;
+        pipeline.startup_packets_remaining = pipeline
+            .packetizer()
+            .map(|packetizer| packetizer.startup_packets(core.source.reported_delay_100us))
+            .unwrap_or(1);
+        pipeline.startup_complete = false;
         runtime()
             .media_state
             .store(MEDIA_STREAMING, Ordering::Release);
@@ -744,7 +769,13 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
         Ok(pipeline) => pipeline,
         Err(error) => return error,
     };
-    if let Err(error) = pipeline.begin(generation, mtu, sbc.maximum_bitpool, fresh) {
+    if let Err(error) = pipeline.begin(
+        generation,
+        mtu,
+        sbc.maximum_bitpool,
+        core.source.reported_delay_100us,
+        fresh,
+    ) {
         return error;
     }
     transport::reset_audio_media_flow();
@@ -838,6 +869,67 @@ fn pump_active(core: &mut Core, generation: u32) -> i32 {
     }
 }
 
+fn pump_startup_silence(core: &mut Core, pipeline: &mut Pipeline) -> Result<bool, i32> {
+    if pipeline.startup_complete {
+        return Ok(true);
+    }
+    if pipeline.startup_packets_remaining == 0 {
+        if runtime().media_tx_outstanding.load(Ordering::Acquire) != 0 {
+            return Ok(false);
+        }
+        pipeline.startup_complete = true;
+        pipeline.next_packet_deadline_ms = 0;
+        return Ok(true);
+    }
+    if !transport::media_flow_available() {
+        return Ok(false);
+    }
+
+    let packet_frames = pipeline
+        .packetizer()
+        .map(|packetizer| packetizer.frames_per_packet)
+        .map_err(|error| error)?;
+    let (frame_length, packet_length) = pipeline.packetizer().and_then(|packetizer| {
+        packetizer
+            .packet_length(packet_frames)
+            .map(|length| (packetizer.frame_length as usize, length))
+            .map_err(|_| ERR_AUDIO_CODEC)
+    })?;
+    let marker = pipeline.marker;
+    let payload = pipeline.packetizer().and_then(|packetizer| {
+        packetizer
+            .write_header(&mut core.media_out[..packet_length], packet_frames, marker)
+            .map_err(|_| ERR_AUDIO_CODEC)
+    })?;
+    pipeline.marker = false;
+    for frame_index in 0..packet_frames as usize {
+        let frame_begin = payload + frame_index * frame_length;
+        let frame_end = frame_begin + frame_length;
+        let encoded = pipeline
+            .encoder()?
+            .encode(&SILENCE_PCM, &mut core.media_out[frame_begin..frame_end])?;
+        if encoded != frame_length {
+            return Err(ERR_AUDIO_CODEC);
+        }
+    }
+    let send = transport::send_audio_media(&core.media_out[..packet_length]);
+    if send != 0 {
+        return Err(send);
+    }
+    pipeline.startup_packets_remaining -= 1;
+    runtime()
+        .media_startup_silence_queued
+        .fetch_add(1, Ordering::Relaxed);
+    AUDIO_STAGE.store(AUDIO_STAGE_RTP, Ordering::Release);
+    if transport::media_flow_available() && pipeline.startup_packets_remaining != 0 {
+        let scheduled = schedule_timer(1, pipeline.session_generation);
+        if scheduled != 0 {
+            return Err(scheduled);
+        }
+    }
+    Ok(false)
+}
+
 fn pump_stream(core: &mut Core, generation: u32) -> i32 {
     let input = audio_device::input();
     if input.generation() != generation {
@@ -857,6 +949,14 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         Some(pipeline) if pipeline.session_generation == generation => pipeline,
         _ => return 0,
     };
+    match pump_startup_silence(core, pipeline) {
+        Ok(true) => {}
+        Ok(false) => return 0,
+        Err(error) => return error,
+    }
+    if !transport::media_flow_available() {
+        return 0;
+    }
     let decoder_pending = pipeline.stream.pending();
     let refill = refill_long_test(input, &mut pipeline.ingest, decoder_pending);
     if refill != 0 {
@@ -1018,12 +1118,6 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
     pipeline.pcm_offset += packet_frames as usize * FRAME_SAMPLES as usize;
     input.add_rtp_packets(generation, 1);
     update_elapsed();
-    if pipeline.startup_packets_remaining != 0 {
-        pipeline.startup_packets_remaining -= 1;
-        if pipeline.startup_packets_remaining != 0 {
-            return schedule_timer(1, generation);
-        }
-    }
     let delay = match pipeline.next_packet_delay(packet_frames) {
         Ok(delay) => delay,
         Err(error) => return error,
