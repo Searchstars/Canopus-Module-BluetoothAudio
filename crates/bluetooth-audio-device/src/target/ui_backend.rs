@@ -18,6 +18,7 @@ struct Binding {
     generation: u32,
     key: u32,
     event_id: u32,
+    enabled: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -61,6 +62,7 @@ const fn empty_backend() -> PageBackend {
             generation: 0,
             key: 0,
             event_id: 0,
+            enabled: false,
         }; UI_MAX_ROWS],
         row_count: 0,
         label_count: 0,
@@ -227,7 +229,7 @@ extern "C" fn row_event(event: *mut core::ffi::c_void) {
         return;
     }
     let binding = backend.bindings[row_index];
-    if binding.event_id == 0 {
+    if binding.event_id == 0 || !binding.enabled {
         return;
     }
     super::handle_ui_event(
@@ -623,6 +625,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             generation: snapshot.generation,
             key: node.key,
             event_id: node.event_id,
+            enabled: node.enabled(),
         };
         used_mask |= 1 << slot;
     }
@@ -634,6 +637,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
                 generation: 0,
                 key: 0,
                 event_id: 0,
+                enabled: false,
             };
         }
     }

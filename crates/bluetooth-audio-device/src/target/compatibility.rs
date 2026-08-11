@@ -2,26 +2,26 @@
 //! receive callback slot. The module is boot-resident before the callback can
 //! outlive its code.
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "target-xiaomi-band-10-pro-3-101-030")]
 use core::sync::atomic::Ordering;
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "target-xiaomi-band-10-pro-3-101-030")]
 use canopus_target_private::{
     bt_gap_install_receive_hook, bt_gap_stock_receive, strip_l2cap_mhdt_option,
 };
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "target-xiaomi-band-10-pro-3-101-030")]
 use super::runtime::{
     ERR_HCI_POLICY, FLAG_HCI_COMPAT_HIT, FLAG_HCI_COMPAT_INSTALLED, MEDIA_CONNECTED,
     MEDIA_CONNECTING, TRANSPORT_CONNECTED, TRANSPORT_CONNECTING, flag_set, runtime,
 };
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "target-xiaomi-band-10-pro-3-101-030")]
 const HCI_PACKET_ACL: u8 = 2;
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "target-xiaomi-band-10-pro-3-101-030")]
 const MAX_H4_PACKET: usize = 4097;
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "target-xiaomi-band-10-pro-3-101-030")]
 extern "C" fn hci_receive_compatibility(
     state: *mut core::ffi::c_void,
     packet: *mut u8,
@@ -57,16 +57,18 @@ extern "C" fn hci_receive_compatibility(
     unsafe { bt_gap_stock_receive(state, packet, forwarded_length) }
 }
 
-/// Installs the compare-before-write GAP host receive filter. This is the final
-/// fallible activation step: after it succeeds the module must remain resident
-/// until reboot. On band-9 the Bluelet stack has no writable band-10 GAP host
-/// receive slot and no mHDT stock limitation, so the step is a no-op.
+/// Installs the compare-before-write GAP host receive filter on the one exact
+/// target whose raw H4 receive slot is proven. Band 9 needs no mHDT shim; Band
+/// 10 .036 remains stock until its real raw ACL seam is recovered.
 pub fn install() -> Result<(), i32> {
-    #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
+    #[cfg(any(
+        feature = "target-xiaomi-band-9-pro-3-1-175",
+        feature = "target-xiaomi-band-10-pro-3-101-036"
+    ))]
     {
         Ok(())
     }
-    #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+    #[cfg(feature = "target-xiaomi-band-10-pro-3-101-030")]
     {
         if unsafe { bt_gap_install_receive_hook(hci_receive_compatibility) } {
             flag_set(FLAG_HCI_COMPAT_INSTALLED, 0);
