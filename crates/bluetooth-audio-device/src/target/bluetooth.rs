@@ -13,7 +13,6 @@ use super::transport;
 
 pub struct DevicePlatform;
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 const ERR_CORE_POLICY: i32 = -1107;
 const BOND_TIMER_EVENT: u8 = 11;
 const BOND_TIMER_REMOVE: u8 = 1;
@@ -30,86 +29,37 @@ struct BondTimerToken {
     reserved: [u8; 3],
 }
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
-type PairRequestCallback = extern "C" fn(*mut core::ffi::c_void, *const u8);
-
-/// Band-9 Bluelet has no band-10 `core_bt_*` callback-table interception; the
-/// stock btm_gap flow drives pairing without a request filter, so the filter
-/// installation is a no-op.
-#[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-fn install_core_pair_filter(_address: [u8; 6]) -> Result<(), i32> {
-    Ok(())
-}
-
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+/// Suppresses the stock companion client's competing rejection only for the
+/// module's active headset transaction. Exact table/slot ABI stays target-private.
 extern "C" fn core_pair_request_filter(cookie: *mut core::ffi::c_void, address: *const u8) {
     let addr = address_from_ptr(address);
     if !address.is_null() && flag(FLAG_BOND_PENDING) && target_matches(addr) {
         flag_set(FLAG_CORE_FILTER_HIT, 0);
         return;
     }
-    let original: PairRequestCallback =
-        unsafe { core::mem::transmute(CORE_BT_PAIR_REQUEST_CALLBACK) };
-    original(cookie, address);
+    unsafe { bt_forward_pair_request(cookie, address) };
 }
 
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
-fn install_core_pair_filter(address: [u8; 6]) -> Result<(), i32> {
+fn install_core_pair_filter(_address: [u8; 6]) -> Result<(), i32> {
     let r = runtime();
-    if unsafe { core_bt_bind_state() } != CORE_BT_BOUND_STATE {
-        return Ok(());
-    }
-    let companion = unsafe { core_bt_companion() };
-    let mut companion_match = true;
-    for (index, value) in address.iter().enumerate() {
-        if unsafe { core::ptr::read_volatile(companion.add(index)) } != *value {
-            companion_match = false;
-            break;
-        }
-    }
-    if companion_match {
-        return Ok(());
-    }
     if r.core_filter_table.load(Ordering::Acquire) != 0 {
         return Ok(());
     }
-    let adapter = unsafe { core_bt_adapter() };
-    let handle_ptr = unsafe { core_bt_callback_handle() };
-    let original_handle = unsafe { core::ptr::read_volatile(handle_ptr) };
-    let stock = unsafe { core_bt_callback_table() };
-    if adapter.is_null()
-        || original_handle == 0
-        || unsafe { *stock.add(CORE_BT_PAIR_REQUEST_SLOT) } as usize
-            != CORE_BT_PAIR_REQUEST_CALLBACK
-    {
-        return Err(ERR_CORE_POLICY);
-    }
-    let mirror = unsafe { bt_alloc((CALLBACK_WORDS * 4) as u32) } as *mut u32;
-    if mirror.is_null() {
-        return Err(ERR_ALLOC);
-    }
-    unsafe {
-        core::ptr::copy_nonoverlapping(stock, mirror, CALLBACK_WORDS);
-        *mirror.add(CORE_BT_PAIR_REQUEST_SLOT) =
-            core_pair_request_filter as *const () as usize as u32;
-    }
-    let mirror_handle = unsafe { bt_adapter_register(adapter, mirror) };
-    if mirror_handle == 0 {
-        unsafe { bt_free(mirror.cast()) };
-        return Err(ERR_CORE_POLICY);
-    }
-    if unsafe { bt_adapter_unregister(adapter, original_handle) } == 0 {
-        unsafe {
-            bt_adapter_unregister(adapter, mirror_handle);
-            bt_free(mirror.cast());
+    match unsafe { bt_install_pair_request_filter(core_pair_request_filter) } {
+        Ok(Some(filter)) => {
+            r.core_filter_table
+                .store(filter.allocation, Ordering::Release);
+            r.core_filter_handle
+                .store(filter.registration, Ordering::Release);
+            flag_set(FLAG_CORE_FILTER_INSTALLED, 0);
+            Ok(())
         }
-        return Err(ERR_CORE_POLICY);
+        Ok(None) => Ok(()),
+        Err(PairRequestFilterError::Allocation) => Err(ERR_ALLOC),
+        Err(PairRequestFilterError::Policy | PairRequestFilterError::Registration) => {
+            Err(ERR_CORE_POLICY)
+        }
     }
-    unsafe { core::ptr::write_volatile(handle_ptr, mirror_handle) };
-    r.core_filter_table
-        .store(mirror as usize, Ordering::Release);
-    flag_set(FLAG_CORE_FILTER_INSTALLED, 0);
-    Ok(())
 }
 
 impl Platform for DevicePlatform {
