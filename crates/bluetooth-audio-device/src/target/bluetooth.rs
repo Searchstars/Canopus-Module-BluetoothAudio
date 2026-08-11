@@ -284,12 +284,16 @@ fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
             | FLAG_REMOVE_PENDING
             | FLAG_REMOVE_CONFIRMED,
     );
-    let (stock, device) = query_bond(address);
+    let (_, device) = query_bond(address);
     if device != BOND_STATE_NONE && device != BOND_STATE_BONDED {
         r.last_error.store(ERRNO_EBUSY, Ordering::Release);
         return Err(ERRNO_EBUSY);
     }
-    let removable = stock == 3 || device == BOND_STATE_BONDED;
+    // The aggregate Classic bit means that a transport-specific record exists;
+    // firmware leaves that record allocated after unpairing with exact state 0.
+    // Native remove accepts only exact state 2, while create_bond expects state 0
+    // and reuses the existing record.
+    let removable = device == BOND_STATE_BONDED;
     if !removable {
         return Ok(false);
     }
@@ -803,11 +807,11 @@ unsafe extern "C" fn on_bond_state(
     }
 
     if state as u32 == BOND_STATE_NONE && flag(FLAG_REMOVE_PENDING) {
-        // A delayed NONE from an older removal has the same address and
-        // transport as this transaction. Confirm that the current Classic
-        // record is actually gone before allowing it to start a fresh bond.
-        let (stock, device) = query_bond(Address(addr));
-        if device != BOND_STATE_NONE || stock == 3 {
+        // Native removal clears the exact transport state but deliberately keeps
+        // its reusable device record, so the aggregate Classic presence bit may
+        // remain set. Only the exact state is authoritative here.
+        let (_, device) = query_bond(Address(addr));
+        if device != BOND_STATE_NONE {
             r.callback_dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
