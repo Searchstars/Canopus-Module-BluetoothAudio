@@ -15,11 +15,12 @@ use canopus_target_private::*;
 use canopus_bluetooth_audio_core::{
     Address, StreamState,
     avdtp::{self, State as SourceState},
+    avrcp::{self, Event as AvrcpEvent},
     media,
 };
 
 use super::runtime::*;
-use super::{audio_device, audio_stream, bluetooth};
+use super::{audio_device, audio_stream, bluetooth, volume_store};
 
 const MEDIA_TIMER_EVENT: u8 = 9;
 const MEDIA_TIMER_TAG: &[u8] = b"A2DPM\0";
@@ -148,8 +149,44 @@ extern "C" fn sdp_work(_unused: i32, event: i32, argument: *mut core::ffi::c_voi
     if handle == 0 {
         r.last_error.store(ERR_SDP, Ordering::Release);
         r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    let avrcp_builder = unsafe {
+        sdp_builder_create(
+            0,
+            SdpAvrcpControllerRecord::SERVICE_UUID,
+            SdpAvrcpControllerRecord::PROFILE_VERSION,
+            0,
+            SdpAvrcpControllerRecord::SERVICE_NAME.as_ptr(),
+        )
+    };
+    if avrcp_builder.is_null() {
+        unsafe { sdp_unregister(handle) };
+        r.last_error.store(ERR_SDP, Ordering::Release);
+        r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    for (id, value) in SdpAvrcpControllerRecord::ATTRIBUTES {
+        unsafe {
+            sdp_set_raw_attribute(
+                avrcp_builder,
+                id,
+                0,
+                value.len() as u16,
+                value.as_ptr().cast(),
+            );
+        }
+    }
+    let avrcp_handle = unsafe { sdp_commit(avrcp_builder) };
+    if avrcp_handle == 0 {
+        unsafe { sdp_unregister(handle) };
+        r.last_error.store(ERR_SDP, Ordering::Release);
+        r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
     } else {
         r.sdp_handle.store(handle, Ordering::Release);
+        r.avrcp_sdp_handle.store(avrcp_handle, Ordering::Release);
         r.sdp_registered.store(1, Ordering::Release);
         r.transport_state.store(TRANSPORT_READY, Ordering::Release);
     }
@@ -349,6 +386,35 @@ fn submit_signaling_disconnect() -> Result<(), i32> {
     Ok(())
 }
 
+fn submit_avrcp_disconnect() -> Result<(), i32> {
+    let r = runtime();
+    let cid = r.avrcp_cid.load(Ordering::Acquire);
+    if cid <= 0x3f {
+        return Err(ERR_AVRCP_STATE);
+    }
+    let request = unsafe { bt_alloc(4) } as *mut DisconnectRequest;
+    if request.is_null() {
+        return Err(ERR_ALLOC);
+    }
+    unsafe {
+        (*request).private_cid = cid as u16;
+        (*request).caller_tag = 0;
+    }
+    r.avrcp_state.store(AVRCP_DISCONNECTING, Ordering::Release);
+    unsafe { bt_l2cap_disconnect(request) };
+    Ok(())
+}
+
+fn continue_control_disconnect() -> Result<(), i32> {
+    if runtime().avrcp_cid.load(Ordering::Acquire) > 0x3f
+        && runtime().avrcp_state.load(Ordering::Acquire) != AVRCP_DISCONNECTING
+    {
+        submit_avrcp_disconnect()
+    } else {
+        submit_signaling_disconnect()
+    }
+}
+
 fn disconnect_owned() -> Result<(), i32> {
     let r = runtime();
     let state = r.transport_state.load(Ordering::Acquire);
@@ -398,7 +464,7 @@ fn disconnect_owned() -> Result<(), i32> {
         }
         return Ok(());
     }
-    if let Err(error) = submit_signaling_disconnect() {
+    if let Err(error) = continue_control_disconnect() {
         r.transport_state.store(state, Ordering::Release);
         return Err(error);
     }
@@ -412,12 +478,26 @@ unsafe fn u16_at(p: *const u8, off: usize) -> u16 {
 fn send_signaling(sdu: &[u8]) -> i32 {
     let r = runtime();
     let cid = r.signaling_cid.load(Ordering::Acquire) as u16;
+    send_l2cap_sdu(sdu, cid, ERR_STATE, ERR_ALLOC)
+}
+
+fn send_avrcp(sdu: &[u8]) -> i32 {
+    let r = runtime();
+    let cid = r.avrcp_cid.load(Ordering::Acquire) as u16;
+    let result = send_l2cap_sdu(sdu, cid, ERR_AVRCP_STATE, ERR_ALLOC);
+    if result == 0 {
+        r.avrcp_packets_sent.fetch_add(1, Ordering::Relaxed);
+    }
+    result
+}
+
+fn send_l2cap_sdu(sdu: &[u8], cid: u16, state_error: i32, alloc_error: i32) -> i32 {
     if sdu.is_empty() || cid <= 0x3f {
-        return ERR_STATE;
+        return state_error;
     }
     let buffer = unsafe { bt_buffer_new(sdu.len() as u16, 12) };
     if buffer.is_null() {
-        return ERR_ALLOC;
+        return alloc_error;
     }
     let queued = unsafe {
         (*buffer).type_ = 1;
@@ -696,6 +776,14 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
                 if let Some(address) = target_load() {
                     core.controller.connected(Address(address));
                 }
+                let avrcp_result = avrcp_submit_connect();
+                if avrcp_result != 0 {
+                    // AVRCP is an independent optional profile. Keep A2DP usable
+                    // for sinks that do not expose AVCTP PSM 23.
+                    r.last_error.store(avrcp_result, Ordering::Release);
+                    r.avrcp_error.store(avrcp_result, Ordering::Release);
+                    r.avrcp_state.store(AVRCP_FAILED, Ordering::Release);
+                }
                 let result = core.source.connected(&mut core.signaling_out);
                 sync_stream_state(core, core.source.state);
                 match result {
@@ -823,6 +911,261 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
     r.transport_state.store(TRANSPORT_FAILED, Ordering::Release);
     unsafe { bt_free(argument) };
     0
+}
+
+// ---------------------------------------------------------------------------
+// AVRCP control channel
+// ---------------------------------------------------------------------------
+
+fn avrcp_submit_connect() -> i32 {
+    let r = runtime();
+    if r.transport_state.load(Ordering::Acquire) != TRANSPORT_CONNECTED
+        || r.avrcp_state
+            .compare_exchange(
+                AVRCP_IDLE,
+                AVRCP_CONNECTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+    {
+        return ERR_AVRCP_STATE;
+    }
+    let request = unsafe { bt_alloc(CONNECT_REQUEST_SIZE as u32) } as *mut u8;
+    if request.is_null() {
+        r.avrcp_state.store(AVRCP_IDLE, Ordering::Release);
+        return ERR_ALLOC;
+    }
+    let Some(address) = target_load() else {
+        unsafe { bt_free(request.cast()) };
+        r.avrcp_state.store(AVRCP_IDLE, Ordering::Release);
+        return ERR_AVRCP_STATE;
+    };
+    unsafe {
+        core::ptr::write_bytes(request, 0, CONNECT_REQUEST_SIZE);
+        configure_avctp_connect_request(request);
+        core::ptr::write_unaligned(
+            request.add(CONNECT_CALLBACK_OFFSET).cast::<u32>(),
+            avrcp_l2cap_callback as *const () as usize as u32,
+        );
+        core::ptr::copy_nonoverlapping(address.as_ptr(), request.add(CONNECT_ADDRESS_OFFSET), 6);
+    }
+    r.avrcp_generation.fetch_add(1, Ordering::AcqRel);
+    r.avrcp_last_event.store(0, Ordering::Release);
+    r.avrcp_error.store(0, Ordering::Release);
+    r.avrcp_packets_sent.store(0, Ordering::Release);
+    r.avrcp_packets_received.store(0, Ordering::Release);
+    r.avrcp_rx_header.store(0, Ordering::Release);
+    r.avrcp_rx_length.store(0, Ordering::Release);
+    let volume = volume_store::selected(address, avrcp::DEFAULT_VOLUME);
+    r.avrcp_volume.store(volume as u32, Ordering::Release);
+    r.avrcp_cid.store(0, Ordering::Release);
+    r.avrcp_mtu.store(0, Ordering::Release);
+    if unsafe { bt_l2cap_connect(request.cast()) } == 0 {
+        r.avrcp_state.store(AVRCP_IDLE, Ordering::Release);
+        return ERR_AVRCP_STATE;
+    }
+    0
+}
+
+extern "C" fn avrcp_retry_work(
+    _owner_valid: i32,
+    event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    avrcp_l2cap_callback_impl(event as u32, argument, true)
+}
+
+extern "C" fn avrcp_l2cap_callback(event: u32, argument: *mut core::ffi::c_void) -> i32 {
+    avrcp_l2cap_callback_impl(event, argument, false)
+}
+
+fn avrcp_l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: bool) -> i32 {
+    if argument.is_null() {
+        return 0;
+    }
+    let r = runtime();
+    let packet = argument.cast::<u8>();
+    r.avrcp_last_event.store(event, Ordering::Release);
+    let dispatch = |core: &mut Core| {
+        let result = (|| match event {
+            EVENT_CONNECTION_CONFIRM => {
+                let cid = unsafe { u16_at(packet, 0) };
+                if r.avrcp_state.load(Ordering::Acquire) != AVRCP_CONNECTING || cid <= 0x3f {
+                    return ERR_AVRCP_STATE;
+                }
+                r.avrcp_cid.store(cid as u32, Ordering::Release);
+                0
+            }
+            EVENT_CONNECTION_COMPLETE => {
+                let cid = unsafe { u16_at(packet, EVENT_COMPLETE_CID_OFFSET) };
+                if r.avrcp_state.load(Ordering::Acquire) != AVRCP_CONNECTING
+                    || cid != r.avrcp_cid.load(Ordering::Acquire) as u16
+                {
+                    return ERR_AVRCP_STATE;
+                }
+                r.avrcp_mtu.store(
+                    unsafe { u16_at(packet, EVENT_COMPLETE_MTU_OFFSET) } as u32,
+                    Ordering::Release,
+                );
+                r.avrcp_state.store(AVRCP_CONNECTED, Ordering::Release);
+                let volume = r
+                    .avrcp_volume
+                    .load(Ordering::Acquire)
+                    .min(avrcp::MAX_VOLUME as u32) as u8;
+                match core.avrcp.connected(volume, &mut core.avrcp_out) {
+                    Ok(len) => {
+                        let send = send_avrcp(&core.avrcp_out[..len]);
+                        if send != 0 {
+                            return send;
+                        }
+                        match core.avrcp.register_volume_notification(&mut core.avrcp_out) {
+                            Ok(len) => send_avrcp(&core.avrcp_out[..len]),
+                            Err(_) => ERR_AVRCP_STATE,
+                        }
+                    }
+                    Err(_) => ERR_AVRCP_STATE,
+                }
+            }
+            EVENT_DATA => {
+                let total = unsafe { u16_at(packet, 0) } as usize;
+                let offset = unsafe { u16_at(packet, 2) } as usize;
+                let cid = unsafe { u16_at(packet, 4) };
+                if r.avrcp_state.load(Ordering::Acquire) != AVRCP_CONNECTED
+                    || cid != r.avrcp_cid.load(Ordering::Acquire) as u16
+                    || total < offset
+                {
+                    return ERR_AVRCP_PACKET;
+                }
+                let input =
+                    unsafe { core::slice::from_raw_parts(packet.add(4 + offset), total - offset) };
+                let mut header = [0u8; 4];
+                let header_len = input.len().min(header.len());
+                header[..header_len].copy_from_slice(&input[..header_len]);
+                r.avrcp_rx_header
+                    .store(u32::from_le_bytes(header), Ordering::Release);
+                r.avrcp_rx_length
+                    .store(input.len() as u32, Ordering::Release);
+                r.avrcp_packets_received.fetch_add(1, Ordering::Relaxed);
+                match core.avrcp.receive(input, &mut core.avrcp_out) {
+                    Ok(AvrcpEvent::Volume(volume)) => {
+                        r.avrcp_volume.store(volume as u32, Ordering::Release);
+                        volume_store::mark_target_pending(volume);
+                        if core.avrcp.state == avrcp::State::Ready {
+                            match core.avrcp.register_volume_notification(&mut core.avrcp_out) {
+                                Ok(len) => send_avrcp(&core.avrcp_out[..len]),
+                                Err(_) => ERR_AVRCP_STATE,
+                            }
+                        } else {
+                            0
+                        }
+                    }
+                    Ok(AvrcpEvent::Reregister) => {
+                        let volume = core.avrcp.volume;
+                        r.avrcp_volume.store(volume as u32, Ordering::Release);
+                        volume_store::mark_target_pending(volume);
+                        match core.avrcp.register_volume_notification(&mut core.avrcp_out) {
+                            Ok(len) => send_avrcp(&core.avrcp_out[..len]),
+                            Err(_) => ERR_AVRCP_STATE,
+                        }
+                    }
+                    Ok(AvrcpEvent::PeerVolume {
+                        volume,
+                        response_len,
+                    }) => {
+                        r.avrcp_volume.store(volume as u32, Ordering::Release);
+                        volume_store::mark_target_pending(volume);
+                        send_avrcp(&core.avrcp_out[..response_len])
+                    }
+                    Ok(AvrcpEvent::PeerCommand(len)) => send_avrcp(&core.avrcp_out[..len]),
+                    Ok(AvrcpEvent::None) => 0,
+                    Err(avrcp::Error::Rejected) => {
+                        // Absolute volume and notifications are optional peer
+                        // features. Record refusal without tearing down AVCTP or
+                        // affecting the independent A2DP media stream.
+                        r.avrcp_error.store(ERR_AVRCP_REMOTE, Ordering::Release);
+                        0
+                    }
+                    Err(_) => {
+                        // A malformed control SDU is isolated to that SDU. Peers
+                        // can legally continue other transactions on this channel.
+                        r.avrcp_error.store(ERR_AVRCP_PACKET, Ordering::Release);
+                        0
+                    }
+                }
+            }
+            EVENT_CHANNEL_STATUS_4 | EVENT_CHANNEL_STATUS_5 | EVENT_FLOW_STATUS => 0,
+            EVENT_DISCONNECTION_COMPLETE => {
+                let cid = unsafe { u16_at(packet, 0) };
+                if cid != r.avrcp_cid.load(Ordering::Acquire) as u16 {
+                    return ERR_AVRCP_STATE;
+                }
+                core.avrcp.disconnected();
+                r.avrcp_cid.store(0, Ordering::Release);
+                r.avrcp_mtu.store(0, Ordering::Release);
+                r.avrcp_state.store(AVRCP_IDLE, Ordering::Release);
+                if r.transport_state.load(Ordering::Acquire) == TRANSPORT_DISCONNECTING
+                    && r.signaling_cid.load(Ordering::Acquire) > 0x3f
+                {
+                    match submit_signaling_disconnect() {
+                        Ok(()) => 0,
+                        Err(error) => error,
+                    }
+                } else {
+                    0
+                }
+            }
+            _ => ERR_AVRCP_STATE,
+        })();
+        if result != 0 {
+            r.last_error.store(result, Ordering::Release);
+            r.avrcp_error.store(result, Ordering::Release);
+            r.avrcp_state.store(AVRCP_FAILED, Ordering::Release);
+        }
+        result
+    };
+    let handled = try_with_core(dispatch);
+    if handled.is_some() {
+        unsafe { bt_free(argument) };
+        return 0;
+    }
+    if !blocking
+        && event <= u8::MAX as u32
+        && queue_owned_callback(avrcp_retry_work, event as u8, argument)
+    {
+        return 0;
+    }
+    r.last_error.store(ERRNO_EBUSY, Ordering::Release);
+    r.avrcp_error.store(ERRNO_EBUSY, Ordering::Release);
+    r.avrcp_state.store(AVRCP_FAILED, Ordering::Release);
+    unsafe { bt_free(argument) };
+    0
+}
+
+pub fn absolute_volume_percent() -> u32 {
+    let volume = runtime()
+        .avrcp_volume
+        .load(Ordering::Acquire)
+        .min(avrcp::MAX_VOLUME as u32) as u8;
+    avrcp::absolute_to_percent(volume)
+}
+
+pub fn set_absolute_volume(percent: u32) -> Result<(), i32> {
+    let volume = avrcp::percent_to_absolute(percent);
+    with_core(|core| {
+        let r = runtime();
+        r.avrcp_volume.store(volume as u32, Ordering::Release);
+        volume_store::mark_target_pending(volume);
+        if r.avrcp_state.load(Ordering::Acquire) != AVRCP_CONNECTED {
+            return Ok(());
+        }
+        let len = core
+            .avrcp
+            .set_absolute_volume(volume, &mut core.avrcp_out)
+            .map_err(|_| ERR_AVRCP_STATE)?;
+        let result = send_avrcp(&core.avrcp_out[..len]);
+        if result == 0 { Ok(()) } else { Err(result) }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,7 +1397,7 @@ fn media_l2cap_callback_impl(
                 r.media_state.store(MEDIA_IDLE, Ordering::Release);
                 if r.transport_state.load(Ordering::Acquire) == TRANSPORT_DISCONNECTING
                     && r.signaling_cid.load(Ordering::Acquire) > 0x3f
-                    && let Err(error) = submit_signaling_disconnect()
+                    && let Err(error) = continue_control_disconnect()
                 {
                     return error;
                 }

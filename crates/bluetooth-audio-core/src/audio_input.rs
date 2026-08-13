@@ -265,7 +265,6 @@ impl<const N: usize> AudioInput<N> {
         self.format.store(0, Ordering::Release);
         self.sample_rate_hint.store(0, Ordering::Release);
         self.channels_hint.store(0, Ordering::Release);
-        self.volume_percent.store(VOLUME_DEFAULT, Ordering::Release);
         self.reset_counters();
         self.invalidate_and_reset(STATE_IDLE);
         Ok(())
@@ -429,6 +428,17 @@ impl<const N: usize> AudioInput<N> {
 
     pub fn set_volume(&self, volume_percent: u32) -> Result<(), InputError> {
         if !self.opened.load(Ordering::Acquire) || volume_percent > VOLUME_MAX {
+            return Err(InputError::Invalid);
+        }
+        self.volume_percent.store(volume_percent, Ordering::Release);
+        Ok(())
+    }
+
+    /// Updates the retained gain independently of the compressed-stream open
+    /// state. Target transports use this to restore peer volume before a writer
+    /// opens the endpoint; ioctl callers continue to use [`Self::set_volume`].
+    pub fn restore_volume(&self, volume_percent: u32) -> Result<(), InputError> {
+        if volume_percent > VOLUME_MAX {
             return Err(InputError::Invalid);
         }
         self.volume_percent.store(volume_percent, Ordering::Release);

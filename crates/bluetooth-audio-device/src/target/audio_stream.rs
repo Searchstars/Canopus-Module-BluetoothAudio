@@ -826,7 +826,7 @@ fn pump_decode_only(generation: u32) -> i32 {
     let decode_started = monotonic_ms();
     let progress = pipeline
         .stream
-        .decode_next(input.volume(), &mut pipeline.pcm, end_of_input);
+        .decode_next(100, &mut pipeline.pcm, end_of_input);
     if let (Some(started), Some(finished)) = (decode_started, monotonic_ms()) {
         DECODE_CPU_MS.fetch_add(finished.wrapping_sub(started), Ordering::Relaxed);
     }
@@ -887,8 +887,7 @@ fn pump_startup_silence(core: &mut Core, pipeline: &mut Pipeline) -> Result<bool
 
     let packet_frames = pipeline
         .packetizer()
-        .map(|packetizer| packetizer.frames_per_packet)
-        .map_err(|error| error)?;
+        .map(|packetizer| packetizer.frames_per_packet)?;
     let (frame_length, packet_length) = pipeline.packetizer().and_then(|packetizer| {
         packetizer
             .packet_length(packet_frames)
@@ -995,11 +994,10 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         pipeline.pcm_frames = carry;
         let end_of_input = state == STATE_DRAINING && input.ring.used() == 0;
         let decode_started = monotonic_ms();
-        let progress = pipeline.stream.decode_next(
-            input.volume(),
-            &mut pipeline.pcm[carry * 2..],
-            end_of_input,
-        );
+        let progress =
+            pipeline
+                .stream
+                .decode_next(100, &mut pipeline.pcm[carry * 2..], end_of_input);
         if let (Some(started), Some(finished)) = (decode_started, monotonic_ms()) {
             DECODE_CPU_MS.fetch_add(finished.wrapping_sub(started), Ordering::Relaxed);
         }

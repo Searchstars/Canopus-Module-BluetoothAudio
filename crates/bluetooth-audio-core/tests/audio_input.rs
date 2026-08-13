@@ -51,6 +51,16 @@ fn ring_reset_invalidates_old_cursors_and_preserves_new_data() {
 }
 
 #[test]
+fn restored_volume_survives_stream_open() {
+    let input = AudioInput::<16>::new();
+    input.restore_volume(37).unwrap();
+    assert_eq!(input.volume(), 37);
+    input.open().unwrap();
+    assert_eq!(input.volume(), 37);
+    assert_eq!(input.restore_volume(101), Err(InputError::Invalid));
+}
+
+#[test]
 fn exclusive_open_and_control_lifecycle_are_enforced() {
     let input = AudioInput::<16>::new();
     input.open().unwrap();
