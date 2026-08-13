@@ -109,8 +109,13 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.status_row(26, "Stream", stream_detail(model.stream))?;
     tree.end()?;
     tree.section(30, "Audio")?;
-    let mtu = unsigned(model.details.media_mtu as u32);
-    tree.status_row(31, "Media MTU", mtu.as_str())?;
+    let mut mtu = FixedText::<32>::default();
+    let _ = write!(
+        mtu,
+        "media {} / ctl {}",
+        model.details.media_mtu, model.details.avrcp_mtu
+    );
+    tree.status_row(31, "Link MTU", mtu.as_str())?;
     let bitpool = unsigned(model.details.bitpool as u32);
     tree.status_row(32, "SBC bitpool", bitpool.as_str())?;
     let packets = unsigned(model.details.packets_sent);
@@ -143,16 +148,21 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.status_row(40, "PCM frames", pcm_frames.as_str())?;
     let audio_packets = unsigned(model.details.audio_rtp_packets);
     tree.status_row(41, "MP3 RTP", audio_packets.as_str())?;
-    let mut media_flow = FixedText::<48>::default();
+    let mut avrcp = FixedText::<80>::default();
     let _ = write!(
-        media_flow,
-        "q{} f{} out{} pre{}",
-        model.details.media_packets_queued,
-        model.details.media_flow_events,
-        model.details.media_tx_outstanding,
-        model.details.startup_silence_packets,
+        avrcp,
+        "{} c{} v{} {}/{} ev{} e{} h{:08X}/{}",
+        avrcp_state_detail(model.details.avrcp_state),
+        model.details.avrcp_cid,
+        model.details.avrcp_volume,
+        model.details.avrcp_packets_sent,
+        model.details.avrcp_packets_received,
+        model.details.avrcp_last_event,
+        model.details.avrcp_error,
+        model.details.avrcp_rx_header,
+        model.details.avrcp_rx_length
     );
-    tree.status_row(49, "Media flow", media_flow.as_str())?;
+    tree.status_row(49, "AVRCP", avrcp.as_str())?;
     let underruns = unsigned(model.details.underruns);
     tree.status_row(42, "Underruns", underruns.as_str())?;
     let audio_error = number(model.details.audio_error);
@@ -279,6 +289,17 @@ fn stream_detail(state: crate::StreamState) -> &'static str {
         crate::StreamState::Streaming => "Playing audio",
         crate::StreamState::Suspending => "Stopping",
         crate::StreamState::Failed => "Failed",
+    }
+}
+
+fn avrcp_state_detail(state: u8) -> &'static str {
+    match state {
+        0 => "Idle",
+        1 => "Connecting PSM 23",
+        2 => "Connected",
+        3 => "Disconnecting",
+        4 => "Failed",
+        _ => "Unknown",
     }
 }
 

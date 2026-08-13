@@ -11,7 +11,7 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 use super::bluetooth::DevicePlatform;
-use canopus_bluetooth_audio_core::{Controller, avdtp, media};
+use canopus_bluetooth_audio_core::{Controller, avdtp, avrcp, media};
 use canopus_target_private::bt_alloc;
 
 pub const MAGIC: u32 = 0x4241_5541; // "BAUA"
@@ -39,6 +39,12 @@ pub const MEDIA_SUSPENDING: u32 = 5;
 pub const MEDIA_COMPLETE: u32 = 6;
 pub const MEDIA_DISCONNECTING: u32 = 7;
 pub const MEDIA_FAILED: u32 = 8;
+
+pub const AVRCP_IDLE: u32 = 0;
+pub const AVRCP_CONNECTING: u32 = 1;
+pub const AVRCP_CONNECTED: u32 = 2;
+pub const AVRCP_DISCONNECTING: u32 = 3;
+pub const AVRCP_FAILED: u32 = 4;
 
 pub const MEDIA_FLAG_START_WHEN_CONNECTED: u32 = 1 << 0;
 pub const MEDIA_FLAG_FINISH_ON_TIMER: u32 = 1 << 1;
@@ -83,6 +89,9 @@ pub const ERR_MEDIA_TIMER: i32 = -1205;
 pub const ERR_AUDIO_DECODE: i32 = -1206;
 pub const ERR_AUDIO_CODEC: i32 = -1207;
 pub const ERR_AUDIO_QUEUE: i32 = -1208;
+pub const ERR_AVRCP_STATE: i32 = -1301;
+pub const ERR_AVRCP_PACKET: i32 = -1302;
+pub const ERR_AVRCP_REMOTE: i32 = -1303;
 pub const ERRNO_EIO: i32 = -5;
 pub const ERRNO_EBUSY: i32 = -16;
 pub const ERRNO_EINVAL: i32 = -22;
@@ -96,8 +105,10 @@ pub const APP_FAILED: u32 = 3;
 pub struct Core {
     pub controller: Controller<DevicePlatform>,
     pub source: avdtp::Source,
+    pub avrcp: avrcp::Controller,
     pub packetizer: Option<media::TonePacketizer>,
     pub signaling_out: [u8; 192],
+    pub avrcp_out: [u8; 32],
     pub media_out: [u8; media::MAX_PACKET],
 }
 
@@ -106,8 +117,10 @@ impl Core {
         Self {
             controller: Controller::new(DevicePlatform),
             source: avdtp::Source::new(generation),
+            avrcp: avrcp::Controller::new(),
             packetizer: None,
             signaling_out: [0; 192],
+            avrcp_out: [0; 32],
             media_out: [0; media::MAX_PACKET],
         }
     }
@@ -141,6 +154,17 @@ pub struct Runtime {
     pub transport_state: AtomicU32,
     pub signaling_cid: AtomicU32,
     pub signaling_mtu: AtomicU32,
+    pub avrcp_state: AtomicU32,
+    pub avrcp_cid: AtomicU32,
+    pub avrcp_mtu: AtomicU32,
+    pub avrcp_generation: AtomicU32,
+    pub avrcp_volume: AtomicU32,
+    pub avrcp_packets_sent: AtomicU32,
+    pub avrcp_packets_received: AtomicU32,
+    pub avrcp_last_event: AtomicU32,
+    pub avrcp_rx_header: AtomicU32,
+    pub avrcp_rx_length: AtomicU32,
+    pub avrcp_error: AtomicI32,
     pub media_state: AtomicU32,
     pub media_cid: AtomicU32,
     pub media_mtu: AtomicU32,
@@ -164,6 +188,7 @@ pub struct Runtime {
     pub audio_timer_handle: AtomicU32,
     pub audio_timer_generation: AtomicU32,
     pub sdp_handle: AtomicU32,
+    pub avrcp_sdp_handle: AtomicU32,
     pub sdp_registered: AtomicU32,
     // Native app / lifecycle.
     pub app_state: AtomicU32,
@@ -204,6 +229,17 @@ impl Runtime {
             transport_state: AtomicU32::new(TRANSPORT_DORMANT),
             signaling_cid: AtomicU32::new(0),
             signaling_mtu: AtomicU32::new(0),
+            avrcp_state: AtomicU32::new(AVRCP_IDLE),
+            avrcp_cid: AtomicU32::new(0),
+            avrcp_mtu: AtomicU32::new(0),
+            avrcp_generation: AtomicU32::new(0),
+            avrcp_volume: AtomicU32::new(avrcp::DEFAULT_VOLUME as u32),
+            avrcp_packets_sent: AtomicU32::new(0),
+            avrcp_packets_received: AtomicU32::new(0),
+            avrcp_last_event: AtomicU32::new(0),
+            avrcp_rx_header: AtomicU32::new(0),
+            avrcp_rx_length: AtomicU32::new(0),
+            avrcp_error: AtomicI32::new(0),
             media_state: AtomicU32::new(MEDIA_IDLE),
             media_cid: AtomicU32::new(0),
             media_mtu: AtomicU32::new(0),
@@ -225,6 +261,7 @@ impl Runtime {
             audio_timer_handle: AtomicU32::new(0),
             audio_timer_generation: AtomicU32::new(0),
             sdp_handle: AtomicU32::new(0),
+            avrcp_sdp_handle: AtomicU32::new(0),
             sdp_registered: AtomicU32::new(0),
             app_state: AtomicU32::new(APP_NONE),
             app_error: AtomicI32::new(0),

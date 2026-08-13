@@ -50,6 +50,7 @@ pub mod runtime;
 pub mod sbc_encoder;
 pub mod transport;
 pub mod ui_backend;
+pub mod volume_store;
 
 pub const PAGE_OVERVIEW: usize = native_app::PAGE_OVERVIEW;
 pub const PAGE_DETAIL: usize = native_app::PAGE_DETAIL;
@@ -140,6 +141,9 @@ pub fn query_status() -> [u32; 20] {
 /// core lock on the page owner thread; Bluetooth callbacks only publish atomics.
 fn sync_target_model(core: &mut Core) {
     let r = runtime();
+    if !volume_store::flush_pending() {
+        r.last_error.store(ERRNO_EIO, Ordering::Release);
+    }
     let mut changed = false;
     let error = r.last_error.load(Ordering::Acquire);
     if core.controller.model.last_error != error {
@@ -163,6 +167,19 @@ fn sync_target_model(core: &mut Core) {
     let signaling_mtu = r.signaling_mtu.load(Ordering::Acquire) as u16;
     let media_cid = r.media_cid.load(Ordering::Acquire) as u16;
     let media_mtu = r.media_mtu.load(Ordering::Acquire) as u16;
+    let avrcp_cid = r.avrcp_cid.load(Ordering::Acquire) as u16;
+    let avrcp_mtu = r.avrcp_mtu.load(Ordering::Acquire) as u16;
+    let avrcp_state = r.avrcp_state.load(Ordering::Acquire) as u8;
+    let avrcp_volume = r.avrcp_volume.load(Ordering::Acquire).min(0x7f) as u8;
+    let avrcp_packets_sent = r.avrcp_packets_sent.load(Ordering::Relaxed);
+    let avrcp_packets_received = r.avrcp_packets_received.load(Ordering::Relaxed);
+    let avrcp_last_event = r.avrcp_last_event.load(Ordering::Acquire);
+    let avrcp_rx_header = r.avrcp_rx_header.load(Ordering::Acquire);
+    let avrcp_rx_length = r
+        .avrcp_rx_length
+        .load(Ordering::Acquire)
+        .min(u16::MAX as u32) as u16;
+    let avrcp_error = r.avrcp_error.load(Ordering::Acquire);
     let stock_bond_state = r.stock_bond_state.load(Ordering::Acquire) as u8;
     let device_bond_state = r.device_bond_state.load(Ordering::Acquire) as u8;
     let runtime_flags = r.flags.load(Ordering::Acquire);
@@ -184,6 +201,16 @@ fn sync_target_model(core: &mut Core) {
         || details.signaling_mtu != signaling_mtu
         || details.media_cid != media_cid
         || details.media_mtu != media_mtu
+        || details.avrcp_cid != avrcp_cid
+        || details.avrcp_mtu != avrcp_mtu
+        || details.avrcp_state != avrcp_state
+        || details.avrcp_volume != avrcp_volume
+        || details.avrcp_packets_sent != avrcp_packets_sent
+        || details.avrcp_packets_received != avrcp_packets_received
+        || details.avrcp_last_event != avrcp_last_event
+        || details.avrcp_rx_header != avrcp_rx_header
+        || details.avrcp_rx_length != avrcp_rx_length
+        || details.avrcp_error != avrcp_error
         || details.stock_bond_state != stock_bond_state
         || details.device_bond_state != device_bond_state
         || details.pairing_flags != pairing_flags
@@ -192,6 +219,16 @@ fn sync_target_model(core: &mut Core) {
         details.signaling_mtu = signaling_mtu;
         details.media_cid = media_cid;
         details.media_mtu = media_mtu;
+        details.avrcp_cid = avrcp_cid;
+        details.avrcp_mtu = avrcp_mtu;
+        details.avrcp_state = avrcp_state;
+        details.avrcp_volume = avrcp_volume;
+        details.avrcp_packets_sent = avrcp_packets_sent;
+        details.avrcp_packets_received = avrcp_packets_received;
+        details.avrcp_last_event = avrcp_last_event;
+        details.avrcp_rx_header = avrcp_rx_header;
+        details.avrcp_rx_length = avrcp_rx_length;
+        details.avrcp_error = avrcp_error;
         details.stock_bond_state = stock_bond_state;
         details.device_bond_state = device_bond_state;
         details.pairing_flags = pairing_flags;

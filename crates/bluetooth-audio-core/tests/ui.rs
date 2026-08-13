@@ -82,6 +82,16 @@ fn detail_keeps_audio_diagnostics_topology_stable() {
     model.details.startup_silence_packets = 3;
     model.details.underruns = 1;
     model.details.audio_error = -1206;
+    model.details.avrcp_state = 2;
+    model.details.avrcp_cid = 65;
+    model.details.avrcp_mtu = 512;
+    model.details.avrcp_volume = 96;
+    model.details.avrcp_packets_sent = 3;
+    model.details.avrcp_packets_received = 2;
+    model.details.avrcp_last_event = 7;
+    model.details.avrcp_rx_header = 0x0048_0E12;
+    model.details.avrcp_rx_length = 14;
+    model.details.avrcp_error = -1303;
     let after = ui::detail(&model).unwrap();
 
     assert_eq!(before.node_count, after.node_count);
@@ -102,10 +112,39 @@ fn detail_keeps_audio_diagnostics_topology_stable() {
     assert_eq!(after.secondary(after.find_by_key(41).unwrap()), "2");
     assert_eq!(
         after.secondary(after.find_by_key(49).unwrap()),
-        "q5 f3 out2 pre3"
+        "Connected c65 v96 3/2 ev7 e-1303 h00480E12/14"
     );
     assert_eq!(after.secondary(after.find_by_key(42).unwrap()), "1");
     assert_eq!(after.secondary(after.find_by_key(43).unwrap()), "-1206");
+    assert_eq!(
+        after.secondary(after.find_by_key(31).unwrap()),
+        "media 0 / ctl 512"
+    );
+}
+
+#[test]
+fn detail_handles_maximum_peer_text_with_avrcp_diagnostics() {
+    let name = DeviceName::from_bytes(&[b'X'; 64]);
+    let mut model = Model {
+        connected: Some(canopus_bluetooth_audio_core::Peer {
+            name,
+            ..Default::default()
+        }),
+        connection: ConnectionState::Ready,
+        stream: StreamState::Open,
+        ..Default::default()
+    };
+    model.details.avrcp_state = 4;
+    model.details.avrcp_cid = u16::MAX;
+    model.details.avrcp_mtu = u16::MAX;
+    model.details.avrcp_volume = 127;
+    model.details.avrcp_packets_sent = u32::MAX;
+    model.details.avrcp_packets_received = u32::MAX;
+    model.details.avrcp_last_event = u32::MAX;
+    model.details.avrcp_rx_header = u32::MAX;
+    model.details.avrcp_rx_length = u16::MAX;
+    model.details.avrcp_error = i32::MIN;
+    assert!(ui::detail(&model).is_ok());
 }
 
 #[test]

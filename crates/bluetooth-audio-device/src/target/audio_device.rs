@@ -13,7 +13,7 @@ use canopus_bluetooth_audio_core::audio_input::{
 use canopus_target_private::canopus_fw_register_driver;
 use canopus_target_private::{bt_alloc, bt_free, file_operations};
 
-use super::audio_stream;
+use super::{audio_stream, transport};
 
 const DEVICE_PATH: &[u8] = b"/dev/canopus_audio\0";
 #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
@@ -118,6 +118,19 @@ fn schedule_control(result: Result<(), InputError>, schedule: fn() -> Result<(),
     }
 }
 
+fn set_local_volume(volume: u32) -> i32 {
+    // The A2DP source streams full-scale PCM; the sink (headset) is the volume
+    // authority. Local volume changes are forwarded to the headset over AVRCP
+    // absolute volume and never attenuate the source's own PCM gain.
+    if volume > canopus_bluetooth_audio_core::audio_input::VOLUME_MAX {
+        return InputError::Invalid.errno();
+    }
+    match transport::set_absolute_volume(volume) {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
+}
+
 extern "C" fn audio_open(_file: *mut c_void) -> i32 {
     errno(input().open())
 }
@@ -200,14 +213,14 @@ extern "C" fn audio_ioctl(_file: *mut c_void, command: i32, argument: usize) -> 
             }
             // SAFETY: ioctl ABI requires a readable u32 percentage.
             let volume = unsafe { (argument as *const u32).read_unaligned() };
-            errno(input().set_volume(volume))
+            set_local_volume(volume)
         }
         IOC_GET_VOLUME => {
             if argument == 0 {
                 return InputError::Invalid.errno();
             }
             // SAFETY: ioctl ABI requires a writable u32 percentage.
-            unsafe { (argument as *mut u32).write_unaligned(input().volume()) };
+            unsafe { (argument as *mut u32).write_unaligned(transport::absolute_volume_percent()) };
             0
         }
         _ => InputError::Invalid.errno(),

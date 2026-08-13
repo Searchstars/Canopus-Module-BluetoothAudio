@@ -7,9 +7,9 @@ use canopus_target_private::*;
 
 use canopus_bluetooth_audio_core::{Address, DeviceName, DiscoveredDevice, Platform};
 
-use super::compatibility;
 use super::runtime::*;
 use super::transport;
+use super::{compatibility, volume_store};
 
 pub struct DevicePlatform;
 
@@ -96,6 +96,13 @@ impl Platform for DevicePlatform {
 
     fn prepare_bond(&mut self, address: Address) -> Result<bool, i32> {
         compatibility::install()?;
+        let volume = volume_store::select(
+            address.0,
+            canopus_bluetooth_audio_core::avrcp::DEFAULT_VOLUME,
+        );
+        runtime()
+            .avrcp_volume
+            .store(volume as u32, Ordering::Release);
         prepare_fresh_bond(address)
     }
 
@@ -788,21 +795,10 @@ unsafe extern "C" fn on_bond_state(
     r.bond_transport.store(transport_arg, Ordering::Release);
     r.bond_state.store(state, Ordering::Release);
     if transport_arg as u32 != CLASSIC_TRANSPORT {
-        let removing = flag(FLAG_REMOVE_PENDING);
-        cancel_bond_timer();
-        transport::bond_failed(addr, ERR_STATE);
-        flag_set(
-            0,
-            FLAG_REMOVE_PENDING | FLAG_BOND_PENDING | FLAG_PAIR_REQUEST | FLAG_PAIR_DISPLAY,
-        );
-        dispatch_core_event(
-            if removing {
-                CORE_EVENT_REMOVE_FAILED
-            } else {
-                CORE_EVENT_BOND_FAILED
-            },
-            addr,
-        );
+        // A dual-mode headset can report an independent LE bond transition for
+        // the same address while Classic pairing is in flight. It is unrelated
+        // to the A2DP transaction and must not cancel its timer or WAIT_BOND.
+        r.callback_dropped.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
