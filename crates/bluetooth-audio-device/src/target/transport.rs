@@ -1013,17 +1013,11 @@ fn avrcp_l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, block
                     .avrcp_volume
                     .load(Ordering::Acquire)
                     .min(avrcp::MAX_VOLUME as u32) as u8;
-                match core.avrcp.connected(volume, &mut core.avrcp_out) {
-                    Ok(len) => {
-                        let send = send_avrcp(&core.avrcp_out[..len]);
-                        if send != 0 {
-                            return send;
-                        }
-                        match core.avrcp.register_volume_notification(&mut core.avrcp_out) {
-                            Ok(len) => send_avrcp(&core.avrcp_out[..len]),
-                            Err(_) => ERR_AVRCP_STATE,
-                        }
-                    }
+                match core.avrcp.connected_for_volume_sync(volume) {
+                    Ok(()) => match core.avrcp.register_volume_notification(&mut core.avrcp_out) {
+                        Ok(len) => send_avrcp(&core.avrcp_out[..len]),
+                        Err(_) => ERR_AVRCP_STATE,
+                    },
                     Err(_) => ERR_AVRCP_STATE,
                 }
             }

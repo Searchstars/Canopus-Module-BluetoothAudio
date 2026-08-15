@@ -53,10 +53,7 @@ fn overview_exposes_pairing_milestones_without_extra_rows() {
         | PAIR_DIAG_DISPLAY;
     let snapshot = ui::overview(&model).unwrap();
     let diagnostic = snapshot.find_by_key(13).unwrap();
-    assert_eq!(
-        snapshot.primary(diagnostic),
-        "Bond 3/2 removed filter-hit mhdt-fixed request confirm"
-    );
+    assert_eq!(snapshot.primary(diagnostic), "Bond 3/2 · 67");
 }
 
 #[test]
