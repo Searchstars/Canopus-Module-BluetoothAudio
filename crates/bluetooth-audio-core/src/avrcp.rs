@@ -26,7 +26,7 @@ const EVENT_VOLUME_CHANGED: u8 = 0x0d;
 const NO_TRANSACTION: u8 = 0xff;
 
 pub const MAX_VOLUME: u8 = 0x7f;
-/// Safe first-connection volume (~50%). Persisted per-peer values override it.
+/// Fallback until the headset reports its current absolute volume.
 pub const DEFAULT_VOLUME: u8 = 0x40;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -93,6 +93,18 @@ impl Controller {
         self.state = State::Ready;
         self.volume = volume;
         self.set_absolute_volume(volume, out)
+    }
+
+    /// Starts the controller without writing a persisted/default volume to the
+    /// peer. The first `REGISTER_NOTIFICATION` interim response becomes the
+    /// source of truth for the headset's current volume.
+    pub fn connected_for_volume_sync(&mut self, volume: u8) -> Result<(), Error> {
+        if self.state != State::Disconnected || volume > MAX_VOLUME {
+            return Err(Error::State);
+        }
+        self.state = State::Ready;
+        self.volume = volume;
+        Ok(())
     }
 
     pub fn target_connected(&mut self, volume: u8) -> Result<(), Error> {

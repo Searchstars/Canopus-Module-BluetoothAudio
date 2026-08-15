@@ -62,6 +62,36 @@ fn sets_volume_then_registers_and_reregisters_notification() {
 }
 
 #[test]
+fn initial_volume_sync_registers_without_overwriting_peer() {
+    let mut controller = Controller::new();
+    let mut out = [0u8; 32];
+    controller
+        .connected_for_volume_sync(DEFAULT_VOLUME)
+        .unwrap();
+    assert_eq!(controller.state, State::Ready);
+
+    let n = controller.register_volume_notification(&mut out).unwrap();
+    assert_eq!(
+        &out[..n],
+        &[
+            0x00, 0x11, 0x0e, 0x03, 0x48, 0x00, 0, 0x19, 0x58, 0x31, 0, 0, 5, 0x0d, 0, 0, 0, 0
+        ]
+    );
+    assert_eq!(
+        controller
+            .receive(
+                &[
+                    0x02, 0x11, 0x0e, 0x0f, 0x48, 0x00, 0, 0x19, 0x58, 0x31, 0, 0, 2, 0x0d, 96,
+                ],
+                &mut out,
+            )
+            .unwrap(),
+        Event::Volume(96)
+    );
+    assert_eq!(controller.volume, 96);
+}
+
+#[test]
 fn tracks_control_and_notification_transactions_independently() {
     let mut controller = Controller::new();
     let mut out = [0u8; 32];

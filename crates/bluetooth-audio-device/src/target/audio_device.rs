@@ -57,6 +57,7 @@ pub fn register() -> Result<(), i32> {
         unsafe { bt_free(allocation.cast()) };
         return Err(-16);
     }
+    #[cfg(not(feature = "device"))]
     let operations = file_operations {
         open: audio_open as *const () as *mut c_void,
         close: audio_close as *const () as *mut c_void,
@@ -65,6 +66,31 @@ pub fn register() -> Result<(), i32> {
         _pad_10: [0; 4],
         ioctl: audio_ioctl as *const () as *mut c_void,
         _tail: [0; 24],
+    };
+    #[cfg(any(
+        feature = "target-xiaomi-band-10-pro-3-101-030",
+        feature = "target-xiaomi-band-10-pro-3-101-036"
+    ))]
+    let operations = file_operations {
+        open: audio_open as *const () as *mut c_void,
+        close: audio_close as *const () as *mut c_void,
+        read: audio_read as *const () as *mut c_void,
+        write: audio_write as *const () as *mut c_void,
+        lseek: core::ptr::null_mut(),
+        ioctl: audio_ioctl as *const () as *mut c_void,
+        _tail: [0; 24],
+    };
+    #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
+    let operations = file_operations {
+        open: audio_open as *const () as *mut c_void,
+        close: audio_close as *const () as *mut c_void,
+        read: audio_read as *const () as *mut c_void,
+        write: audio_write as *const () as *mut c_void,
+        lseek: core::ptr::null_mut(),
+        ioctl: audio_ioctl as *const () as *mut c_void,
+        _pad_18: [0; 8],
+        fsync: core::ptr::null_mut(),
+        _tail: [0; 12],
     };
     let operations_ptr = core::ptr::addr_of_mut!(FILE_OPERATIONS).cast::<file_operations>();
     // SAFETY: activation is single-threaded and this resident table is written

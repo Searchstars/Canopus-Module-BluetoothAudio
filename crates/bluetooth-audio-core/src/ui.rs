@@ -1,8 +1,4 @@
-use crate::{
-    ConnectionState, Model, PAIR_DIAG_BONDED, PAIR_DIAG_DISPLAY, PAIR_DIAG_FILTER_HIT,
-    PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST,
-    ScanState,
-};
+use crate::{ConnectionState, Model, ScanState};
 use canopus_ui_core::{Snapshot, TextStyle, Tree, UiError};
 use core::fmt::{self, Write};
 
@@ -223,27 +219,14 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.commit()
 }
 
-fn pairing_diagnostic(model: &Model) -> FixedText<96> {
+fn pairing_diagnostic(model: &Model) -> FixedText<32> {
     let details = &model.details;
-    let mut text = FixedText::<96>::default();
+    let mut text = FixedText::<32>::default();
     let _ = write!(
         text,
-        "Bond {}/{}",
-        details.stock_bond_state, details.device_bond_state
+        "Bond {}/{} · {:02X}",
+        details.stock_bond_state, details.device_bond_state, details.pairing_flags
     );
-    for (flag, label) in [
-        (PAIR_DIAG_REMOVE_PENDING, " remove-wait"),
-        (PAIR_DIAG_REMOVE_CONFIRMED, " removed"),
-        (PAIR_DIAG_FILTER_HIT, " filter-hit"),
-        (PAIR_DIAG_MHDT_FIXED, " mhdt-fixed"),
-        (PAIR_DIAG_REQUEST, " request"),
-        (PAIR_DIAG_DISPLAY, " confirm"),
-        (PAIR_DIAG_BONDED, " bonded"),
-    ] {
-        if details.pairing_flags & flag != 0 {
-            let _ = text.write_str(label);
-        }
-    }
     text
 }
 
@@ -267,14 +250,14 @@ fn connection_detail(state: ConnectionState) -> &'static str {
     match state {
         ConnectionState::Disconnected => "Not connected",
         ConnectionState::WaitingForScanStop => "Preparing…",
-        ConnectionState::CheckingBond => "Checking pairing…",
-        ConnectionState::RemovingBond => "Clearing old pairing…",
+        ConnectionState::CheckingBond => "Checking…",
+        ConnectionState::RemovingBond => "Clearing…",
         ConnectionState::Pairing => "Pairing…",
         ConnectionState::Connecting => "Connecting…",
-        ConnectionState::Configuring => "Setting up audio…",
+        ConnectionState::Configuring => "Audio setup…",
         ConnectionState::Ready => "Connected",
         ConnectionState::Disconnecting => "Disconnecting…",
-        ConnectionState::Failed => "Connection failed",
+        ConnectionState::Failed => "Failed",
     }
 }
 fn stream_detail(state: crate::StreamState) -> &'static str {
