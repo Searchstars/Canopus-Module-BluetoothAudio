@@ -107,6 +107,10 @@ pub struct LinkDetails {
     pub startup_prepare_ms: u32,
     pub startup_avdtp_ms: u32,
     pub audio_error: i32,
+    pub audio_register_result: i32,
+    pub audio_probe_result: i32,
+    pub audio_probe_abi: u32,
+    pub audio_last_command: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -39,6 +39,19 @@ fn device_rows_use_stable_address_keys() {
 }
 
 #[test]
+fn overview_exposes_audio_endpoint_diagnostics() {
+    let mut model = Model::default();
+    model.details.audio_register_result = 0;
+    model.details.audio_probe_result = -25;
+    model.details.audio_probe_abi = 0;
+    model.details.audio_last_command = 0x304;
+    let snapshot = ui::overview(&model).unwrap();
+    let row = snapshot.find_by_key(14).unwrap();
+    assert_eq!(snapshot.primary(row), "Audio endpoint");
+    assert_eq!(snapshot.secondary(row), "reg 0 probe -25 abi 0 cmd 0x304");
+}
+
+#[test]
 fn overview_exposes_pairing_milestones_without_extra_rows() {
     let mut model = Model {
         selected: Some(Default::default()),

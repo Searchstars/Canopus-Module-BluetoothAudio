@@ -41,6 +41,11 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
         let error = number(model.last_error);
         tree.text(12, error.as_str(), TextStyle::Warning)?;
     }
+    tree.status_row(
+        14,
+        "Audio endpoint",
+        audio_endpoint_detail(&model.details).as_str(),
+    )?;
     if model.selected.is_some() {
         let diagnostic = pairing_diagnostic(model);
         tree.text(13, diagnostic.as_str(), TextStyle::Description)?;
@@ -220,6 +225,19 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     tree.end()?;
     tree.end()?;
     tree.commit()
+}
+
+fn audio_endpoint_detail(details: &crate::LinkDetails) -> FixedText<64> {
+    let mut text = FixedText::default();
+    let _ = write!(
+        text,
+        "reg {} probe {} abi {} cmd 0x{:03X}",
+        details.audio_register_result,
+        details.audio_probe_result,
+        details.audio_probe_abi,
+        details.audio_last_command,
+    );
+    text
 }
 
 fn pairing_diagnostic(model: &Model) -> FixedText<32> {

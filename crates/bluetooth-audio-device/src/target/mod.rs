@@ -236,7 +236,7 @@ fn sync_target_model(core: &mut Core) {
         details.pairing_flags = pairing_flags;
         changed = true;
     }
-    let audio = audio_device::input().status();
+    let audio = audio_device::status().unwrap_or_default();
     let (
         audio_elapsed_ms,
         decode_cpu_ms,
@@ -262,6 +262,8 @@ fn sync_target_model(core: &mut Core) {
     } else {
         0
     };
+    let (audio_register_result, audio_probe_result, audio_probe_abi, audio_last_command) =
+        audio_device::diagnostics();
     if details.bitpool != bitpool
         || details.audio_state != audio.state as u8
         || details.audio_stage != audio_stage
@@ -282,6 +284,10 @@ fn sync_target_model(core: &mut Core) {
         || details.startup_prepare_ms != startup_prepare_ms
         || details.startup_avdtp_ms != startup_avdtp_ms
         || details.audio_error != audio_error
+        || details.audio_register_result != audio_register_result
+        || details.audio_probe_result != audio_probe_result
+        || details.audio_probe_abi != audio_probe_abi
+        || details.audio_last_command != audio_last_command
     {
         details.bitpool = bitpool;
         details.audio_state = audio.state as u8;
@@ -303,6 +309,10 @@ fn sync_target_model(core: &mut Core) {
         details.startup_prepare_ms = startup_prepare_ms;
         details.startup_avdtp_ms = startup_avdtp_ms;
         details.audio_error = audio_error;
+        details.audio_register_result = audio_register_result;
+        details.audio_probe_result = audio_probe_result;
+        details.audio_probe_abi = audio_probe_abi;
+        details.audio_last_command = audio_last_command;
         changed = true;
     }
     if changed {
