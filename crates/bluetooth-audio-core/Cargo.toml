@@ -9,6 +9,10 @@ rust-version.workspace = true
 [lib]
 crate-type = ["rlib"]
 
+[features]
+default = []
+production = []
+
 [dependencies]
 canopus-ui-core = { path = "../../../Canopus/sdk/rust/canopus-ui-core" }
 nanomp3 = { path = "../../third_party/nanomp3" }
