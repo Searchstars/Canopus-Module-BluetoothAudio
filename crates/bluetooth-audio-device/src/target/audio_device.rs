@@ -3,7 +3,7 @@
 use core::{
     ffi::c_void,
     mem::{MaybeUninit, size_of},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering},
 };
 
 use canopus_bluetooth_audio_core::audio_input::{
@@ -11,7 +11,9 @@ use canopus_bluetooth_audio_core::audio_input::{
 };
 #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
 use canopus_target_private::canopus_fw_register_driver;
-use canopus_target_private::{bt_alloc, bt_free, file_operations};
+use canopus_target_private::{
+    O_RDWR, bt_alloc, bt_free, file_operations, get_errno, nuttx_close, nuttx_ioctl, nuttx_open,
+};
 
 use super::{audio_stream, transport};
 
@@ -34,6 +36,55 @@ const IOC_GET_VOLUME: u32 = 0x311;
 
 static AUDIO_INPUT_PTR: AtomicUsize = AtomicUsize::new(0);
 static mut FILE_OPERATIONS: MaybeUninit<file_operations> = MaybeUninit::uninit();
+static AUDIO_REGISTER_RESULT: AtomicI32 = AtomicI32::new(-1);
+static AUDIO_PROBE_RESULT: AtomicI32 = AtomicI32::new(-1);
+static AUDIO_PROBE_ABI: AtomicU32 = AtomicU32::new(0);
+static AUDIO_LAST_COMMAND: AtomicU32 = AtomicU32::new(0);
+
+pub fn diagnostics() -> (i32, i32, u32, u32) {
+    (
+        AUDIO_REGISTER_RESULT.load(Ordering::Acquire),
+        AUDIO_PROBE_RESULT.load(Ordering::Acquire),
+        AUDIO_PROBE_ABI.load(Ordering::Acquire),
+        AUDIO_LAST_COMMAND.load(Ordering::Acquire),
+    )
+}
+
+fn normalize_result(result: i32) -> i32 {
+    if result == -1 {
+        let errno = unsafe { get_errno() };
+        if errno > 0 {
+            return -errno;
+        }
+    }
+    result
+}
+
+fn probe_endpoint() -> (i32, u32) {
+    let fd = unsafe { nuttx_open(DEVICE_PATH.as_ptr(), O_RDWR) };
+    if fd < 0 {
+        return (normalize_result(fd), 0);
+    }
+    let mut abi = 0u32;
+    AUDIO_LAST_COMMAND.store(IOC_GET_ABI, Ordering::Release);
+    let result = normalize_result(unsafe {
+        nuttx_ioctl(fd, IOC_GET_ABI, core::ptr::addr_of_mut!(abi) as usize)
+    });
+    let _ = unsafe { nuttx_close(fd) };
+    if result == 0 && abi != ABI_VERSION {
+        return (-22, abi);
+    }
+    (result, abi)
+}
+
+pub fn status() -> Option<StatusV1> {
+    let pointer = AUDIO_INPUT_PTR.load(Ordering::Acquire) as *const AudioInput<INPUT_CAPACITY>;
+    if pointer.is_null() {
+        None
+    } else {
+        Some(unsafe { (&*pointer).status() })
+    }
+}
 
 pub fn input() -> &'static AudioInput<INPUT_CAPACITY> {
     let pointer = AUDIO_INPUT_PTR.load(Ordering::Acquire) as *const AudioInput<INPUT_CAPACITY>;
@@ -43,9 +94,13 @@ pub fn input() -> &'static AudioInput<INPUT_CAPACITY> {
 }
 
 pub fn register() -> Result<(), i32> {
+    AUDIO_REGISTER_RESULT.store(-1, Ordering::Release);
+    AUDIO_PROBE_RESULT.store(-1, Ordering::Release);
+    AUDIO_PROBE_ABI.store(0, Ordering::Release);
     let allocation = unsafe { bt_alloc(size_of::<AudioInput<INPUT_CAPACITY>>() as u32) }
         as *mut AudioInput<INPUT_CAPACITY>;
     if allocation.is_null() {
+        AUDIO_REGISTER_RESULT.store(-12, Ordering::Release);
         return Err(-12);
     }
     // SAFETY: this fresh allocation is unpublished and correctly aligned.
@@ -55,6 +110,7 @@ pub fn register() -> Result<(), i32> {
         .is_err()
     {
         unsafe { bt_free(allocation.cast()) };
+        AUDIO_REGISTER_RESULT.store(-16, Ordering::Release);
         return Err(-16);
     }
     #[cfg(not(feature = "device"))]
@@ -116,8 +172,13 @@ pub fn register() -> Result<(), i32> {
         )
     };
     if result == 0 {
+        AUDIO_REGISTER_RESULT.store(0, Ordering::Release);
+        let (probe_result, abi) = probe_endpoint();
+        AUDIO_PROBE_RESULT.store(probe_result, Ordering::Release);
+        AUDIO_PROBE_ABI.store(abi, Ordering::Release);
         Ok(())
     } else {
+        AUDIO_REGISTER_RESULT.store(result, Ordering::Release);
         AUDIO_INPUT_PTR.store(0, Ordering::Release);
         unsafe { bt_free(allocation.cast()) };
         Err(result)
@@ -201,6 +262,7 @@ extern "C" fn audio_write(_file: *mut c_void, buffer: *const c_void, count: u32)
 }
 
 extern "C" fn audio_ioctl(_file: *mut c_void, command: i32, argument: usize) -> i32 {
+    AUDIO_LAST_COMMAND.store(command as u32, Ordering::Release);
     match command as u32 {
         IOC_GET_ABI => {
             if argument == 0 {
