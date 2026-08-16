@@ -144,6 +144,7 @@ fn detail_handles_maximum_peer_text_with_avrcp_diagnostics() {
     assert!(ui::detail(&model).is_ok());
 }
 
+#[cfg(not(feature = "production"))]
 #[test]
 fn detail_enables_audio_tests_only_when_stream_ready() {
     let mut model = Model {
@@ -160,4 +161,20 @@ fn detail_enables_audio_tests_only_when_stream_ready() {
     assert!(ready.find_by_key(34).unwrap().enabled());
     assert!(ready.find_by_key(35).unwrap().enabled());
     assert!(ready.find_by_key(44).unwrap().enabled());
+}
+
+#[cfg(feature = "production")]
+#[test]
+fn detail_omits_audio_test_actions_in_production() {
+    let model = Model {
+        connected: Some(Default::default()),
+        connection: ConnectionState::Ready,
+        stream: StreamState::Open,
+        ..Default::default()
+    };
+    let snapshot = ui::detail(&model).unwrap();
+    assert!(snapshot.find_by_key(34).is_none());
+    assert!(snapshot.find_by_key(35).is_none());
+    assert!(snapshot.find_by_key(44).is_none());
+    assert!(snapshot.find_by_key(36).is_some());
 }

@@ -82,8 +82,10 @@ pub fn activate() -> i32 {
     runtime().resident.store(true, Ordering::Release);
     if bluetooth::adapter_is_on() {
         if let Err(error) = transport::schedule_initialize_if_ready() {
+            // Transport setup is retried by the adapter/connection callbacks;
+            // it must not prevent the local audio endpoint from being
+            // registered for this activation.
             runtime().last_error.store(error, Ordering::Release);
-            return error;
         }
         // The ON callback and every connection operation retry hook install. A
         // freshly powered stack may report ON before it has populated the slot,
@@ -383,17 +385,23 @@ pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u
                 .get(index)
                 .is_some_and(|device| key == ui::device_key(device.address));
         }
-        matches!(
+        let valid = matches!(
             (key, event_id),
             (11, ui::EVENT_CONNECTED_DETAIL)
                 | (21, ui::EVENT_SCAN)
                 | (31, ui::EVENT_REFRESH)
-                | (34, ui::EVENT_TEST_TONE)
-                | (35, ui::EVENT_LONG_MP3)
-                | (44, ui::EVENT_LONG_MP3_DECODE_ONLY)
                 | (36, ui::EVENT_DISCONNECT)
                 | (1, ui::EVENT_BACK)
-        )
+        );
+        #[cfg(not(feature = "production"))]
+        let valid = valid
+            || matches!(
+                (key, event_id),
+                (34, ui::EVENT_TEST_TONE)
+                    | (35, ui::EVENT_LONG_MP3)
+                    | (44, ui::EVENT_LONG_MP3_DECODE_ONLY)
+            );
+        valid
     });
     if valid {
         handle_action(page_index, event_id);
@@ -436,80 +444,83 @@ fn handle_action(page_index: usize, event_id: u32) {
         rebuild(page_index);
         return;
     }
-    if event_id == ui::EVENT_TEST_TONE {
-        let ready = with_core(|core| {
-            if core.controller.model.connection == ConnectionState::Ready
-                && core.controller.model.stream == StreamState::Open
-            {
-                core.controller.model.stream = StreamState::Starting;
-                core.controller.model.touch();
-                true
-            } else {
-                false
-            }
-        });
-        if ready {
-            match transport::schedule_play_tone() {
-                Ok(()) => runtime().last_error.store(0, Ordering::Release),
-                Err(error) => {
-                    runtime().last_error.store(error, Ordering::Release);
-                    with_core(|core| {
-                        if core.controller.model.stream == StreamState::Starting {
-                            core.controller.model.stream = StreamState::Open;
-                            core.controller.model.touch();
-                        }
-                    });
+    #[cfg(not(feature = "production"))]
+    {
+        if event_id == ui::EVENT_TEST_TONE {
+            let ready = with_core(|core| {
+                if core.controller.model.connection == ConnectionState::Ready
+                    && core.controller.model.stream == StreamState::Open
+                {
+                    core.controller.model.stream = StreamState::Starting;
+                    core.controller.model.touch();
+                    true
+                } else {
+                    false
+                }
+            });
+            if ready {
+                match transport::schedule_play_tone() {
+                    Ok(()) => runtime().last_error.store(0, Ordering::Release),
+                    Err(error) => {
+                        runtime().last_error.store(error, Ordering::Release);
+                        with_core(|core| {
+                            if core.controller.model.stream == StreamState::Starting {
+                                core.controller.model.stream = StreamState::Open;
+                                core.controller.model.touch();
+                            }
+                        });
+                    }
                 }
             }
+            rebuild(page_index);
+            return;
         }
-        rebuild(page_index);
-        return;
-    }
-    if event_id == ui::EVENT_LONG_MP3 {
-        // Publish Starting before enqueueing work, but never enqueue while the
-        // UI context owns CORE_LOCK. The Bluetooth owner may run the work
-        // immediately; queueing under the lock creates a priority inversion.
-        let ready = with_core(|core| {
-            if core.controller.model.connection == ConnectionState::Ready
-                && core.controller.model.stream == StreamState::Open
-            {
-                core.controller.model.stream = StreamState::Starting;
-                core.controller.model.touch();
-                true
-            } else {
-                false
-            }
-        });
-        if ready {
-            match audio_stream::start_long_test() {
-                Ok(()) => runtime().last_error.store(0, Ordering::Release),
-                Err(error) => {
-                    runtime().last_error.store(error, Ordering::Release);
-                    with_core(|core| {
-                        if core.controller.model.stream == StreamState::Starting {
-                            core.controller.model.stream = StreamState::Open;
-                            core.controller.model.touch();
-                        }
-                    });
+        if event_id == ui::EVENT_LONG_MP3 {
+            // Publish Starting before enqueueing work, but never enqueue while the
+            // UI context owns CORE_LOCK. The Bluetooth owner may run the work
+            // immediately; queueing under the lock creates a priority inversion.
+            let ready = with_core(|core| {
+                if core.controller.model.connection == ConnectionState::Ready
+                    && core.controller.model.stream == StreamState::Open
+                {
+                    core.controller.model.stream = StreamState::Starting;
+                    core.controller.model.touch();
+                    true
+                } else {
+                    false
+                }
+            });
+            if ready {
+                match audio_stream::start_long_test() {
+                    Ok(()) => runtime().last_error.store(0, Ordering::Release),
+                    Err(error) => {
+                        runtime().last_error.store(error, Ordering::Release);
+                        with_core(|core| {
+                            if core.controller.model.stream == StreamState::Starting {
+                                core.controller.model.stream = StreamState::Open;
+                                core.controller.model.touch();
+                            }
+                        });
+                    }
                 }
             }
+            rebuild(page_index);
+            return;
         }
-        rebuild(page_index);
-        return;
-    }
-    if event_id == ui::EVENT_LONG_MP3_DECODE_ONLY {
-        let ready = with_core(|core| {
-            core.controller.model.connection == ConnectionState::Ready
-                && core.controller.model.stream == StreamState::Open
-        });
-        if ready {
-            match audio_stream::start_long_test_decode_only() {
-                Ok(()) => runtime().last_error.store(0, Ordering::Release),
-                Err(error) => runtime().last_error.store(error, Ordering::Release),
+        if event_id == ui::EVENT_LONG_MP3_DECODE_ONLY {
+            let ready = with_core(|core| {
+                core.controller.model.connection == ConnectionState::Ready
+                    && core.controller.model.stream == StreamState::Open
+            });
+            if ready {
+                match audio_stream::start_long_test_decode_only() {
+                    Ok(()) => runtime().last_error.store(0, Ordering::Release),
+                    Err(error) => runtime().last_error.store(error, Ordering::Release),
+                }
             }
+            rebuild(page_index);
+            return;
         }
-        rebuild(page_index);
-        return;
     }
     if event_id >= ui::EVENT_DEVICE_BASE {
         let index = (event_id - ui::EVENT_DEVICE_BASE) as usize;

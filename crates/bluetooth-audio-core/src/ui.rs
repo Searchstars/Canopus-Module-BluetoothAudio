@@ -198,16 +198,19 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     let mut rtp_rate = FixedText::<24>::default();
     let _ = write!(rtp_rate, "{} packets/s", rtp_per_second);
     tree.status_row(48, "RTP rate", rtp_rate.as_str())?;
-    let can_play =
-        model.connection == ConnectionState::Ready && model.stream == crate::StreamState::Open;
-    tree.button(34, "Play test tone", EVENT_TEST_TONE, can_play)?;
-    tree.button(35, "Play long MP3", EVENT_LONG_MP3, can_play)?;
-    tree.button(
-        44,
-        "Decode long MP3 only",
-        EVENT_LONG_MP3_DECODE_ONLY,
-        can_play,
-    )?;
+    #[cfg(not(feature = "production"))]
+    {
+        let can_play =
+            model.connection == ConnectionState::Ready && model.stream == crate::StreamState::Open;
+        tree.button(34, "Play test tone", EVENT_TEST_TONE, can_play)?;
+        tree.button(35, "Play long MP3", EVENT_LONG_MP3, can_play)?;
+        tree.button(
+            44,
+            "Decode long MP3 only",
+            EVENT_LONG_MP3_DECODE_ONLY,
+            can_play,
+        )?;
+    }
     tree.button(
         36,
         "Disconnect",
