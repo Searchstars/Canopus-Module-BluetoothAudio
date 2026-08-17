@@ -7,12 +7,12 @@ fn sets_volume_then_registers_and_reregisters_notification() {
     let mut controller = Controller::new();
     let mut out = [0u8; 32];
     let n = controller.connected(DEFAULT_VOLUME, &mut out).unwrap();
-    assert_eq!(DEFAULT_VOLUME, 64);
+    assert_eq!(DEFAULT_VOLUME, 32);
     assert_eq!(controller.state, State::WaitingSetVolume);
     assert_eq!(
         &out[..n],
         &[
-            0x00, 0x11, 0x0e, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58, 0x50, 0, 0, 1, 64
+            0x00, 0x11, 0x0e, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58, 0x50, 0, 0, 1, 32
         ]
     );
 

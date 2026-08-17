@@ -27,7 +27,7 @@ const NO_TRANSACTION: u8 = 0xff;
 
 pub const MAX_VOLUME: u8 = 0x7f;
 /// Fallback until the headset reports its current absolute volume.
-pub const DEFAULT_VOLUME: u8 = 0x40;
+pub const DEFAULT_VOLUME: u8 = 0x20;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum State {
