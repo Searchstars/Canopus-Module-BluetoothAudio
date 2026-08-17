@@ -17,7 +17,7 @@ pub const PAGE_DETAIL: usize = 1;
 
 pub const PACKAGE_NAME: &[u8] = b"com.canopus.headphones\0";
 pub const DISPLAY_NAME: &[u8] = b"Headphones\0";
-pub const LAUNCHER_ICON: &[u8] = b"/resource/app/launcher/flashlight.bin\0";
+pub const LAUNCHER_ICON: &[u8] = b"/data/canopus/appicon_headphones.bin\0";
 const PAGE_NAME_OVERVIEW: &[u8] = b"headphones\0";
 const PAGE_NAME_DETAIL: &[u8] = b"headphones_detail\0";
 

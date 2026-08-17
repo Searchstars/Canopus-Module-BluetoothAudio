@@ -69,6 +69,12 @@ for target in targets:
     assert receipt[144:176] == module_digest
     module_digests.add(module_digest)
 assert len(module_digests) == len(targets), "target payloads must not be identical"
+appicon = (watchface / "appicon_headphones.bin").read_bytes()
+assert len(appicon) == 54768 and appicon[:4] == b"\x19\x10\0\0"
+icon_width, icon_height, icon_stride, icon_reserved = struct.unpack_from("<4H", appicon, 4)
+assert (icon_width, icon_height, icon_stride, icon_reserved) == (117, 117, 468, 0)
+assert len(appicon) == 12 + icon_height * icon_stride
+assert appicon == (root / "watchfaces" / "bluetooth-audio" / "appicon_headphones.bin").read_bytes()
 actual_files = set(watchface.glob("bluetooth-audio-*.bin"))
 assert actual_files == expected_files, (sorted(map(str, actual_files)), sorted(map(str, expected_files)))
 assert not list(watchface.glob("bluetooth-audio-*.cmi"))

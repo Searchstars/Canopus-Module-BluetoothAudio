@@ -38,9 +38,14 @@ module = (watchface / "module.bin").read_bytes()
 receipt = (watchface / "receipt.bin").read_bytes()
 long_audio = (watchface / "long_test_audio.bin").read_bytes()
 long_audio_stream = (watchface / "long_test_audio_stream.bin").read_bytes()
+appicon = (watchface / "appicon_headphones.bin").read_bytes()
 assert module == source_module and receipt == source_receipt
 assert module[:4] == b"\x7fELF" and 512 <= len(module) <= 262144
 assert receipt[:4] == b"CMI1" and len(receipt) == 256
+assert len(appicon) == 54768 and appicon[:4] == b"\x19\x10\0\0"
+icon_width, icon_height, icon_stride, icon_reserved = struct.unpack_from("<4H", appicon, 4)
+assert (icon_width, icon_height, icon_stride, icon_reserved) == (117, 117, 468, 0)
+assert len(appicon) == 12 + icon_height * icon_stride
 assert long_audio[:3] == b"ID3" and len(long_audio) >= 4096
 assert long_audio_stream[0] == 0xff and long_audio_stream[1] & 0xe0 == 0xe0
 assert len(long_audio_stream) >= 4096

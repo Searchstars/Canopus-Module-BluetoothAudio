@@ -38,12 +38,21 @@ package.loaded["lvgl"] = lvgl
 local original_io_open = io.open
 local original_os_execute = os.execute
 
+local function icon_fixture()
+    return string.char(0x19, 0x10, 0, 0, 2, 0, 2, 0, 8, 0, 0, 0)
+        .. string.rep("\0", 16)
+end
+
 local function installer_io(fault)
     local files = {
         ["/fake/receipt.bin"] = "CMI1" .. string.rep("\0", 252),
         ["/fake/module.bin"] = "\127ELF" .. string.rep("\0", 508),
         ["/fake/long_test_audio_stream.bin"] = "\255\243",
+        ["/fake/appicon_headphones.bin"] = icon_fixture(),
     }
+    if fault == "missing_icon" then
+        files["/fake/appicon_headphones.bin"] = nil
+    end
     local device_request
     local function open(path, mode)
         if path == "/dev/canopus" then
@@ -111,12 +120,32 @@ local function check(path, fault)
         return false
     end
     local request, files = state()
+    if fault == "missing_icon" then
+        if request ~= nil then
+            print("ICON FAIL-CLOSED REQUEST FAIL:", path)
+            return false
+        end
+        local diagnosed = false
+        for _, object in ipairs(created) do
+            local text = object._last_set and object._last_set.text
+            if type(text) == "string" and text:match("Install failed") then
+                diagnosed = true
+            end
+        end
+        if not diagnosed then
+            print("ICON DIAGNOSTIC FAIL:", path)
+            return false
+        end
+        print("watchface icon staging failure handled: " .. path)
+        return true
+    end
     local suffix = TOKEN .. "\0"
     if type(request) ~= "string" or request:sub(1, 4) ~= "2CPC"
         or request:byte(17) ~= 2
         or request:sub(-#suffix) ~= suffix
         or files["/data/canopus/inbox/" .. TOKEN .. ".cmi"] == nil
-        or files["/data/canopus/inbox/" .. TOKEN .. ".ko"] == nil then
+        or files["/data/canopus/inbox/" .. TOKEN .. ".ko"] == nil
+        or files["/data/canopus/appicon_headphones.bin"] ~= icon_fixture() then
         print("INSTALL FLOW FAIL:", path)
         return false
     end
@@ -150,6 +179,7 @@ end
 
 local path = arg[1] or DEFAULT
 local ok_all = check(path)
+if ok_all and not check(path, "missing_icon") then ok_all = false end
 if ok_all and not check(path, "short_write") then ok_all = false end
 if ok_all and not check(path, "stale_response") then ok_all = false end
 if not ok_all then os.exit(1) end

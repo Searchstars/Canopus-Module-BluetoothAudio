@@ -11,6 +11,8 @@ local RECEIPT_RESOURCE = SCRIPT_PATH .. "receipt.bin"
 local MODULE_RESOURCE = SCRIPT_PATH .. "module.bin"
 local LONG_AUDIO_RESOURCE = SCRIPT_PATH .. "long_test_audio_stream.bin"
 local LONG_AUDIO_PATH = "/data/canopus/tmp_btaudio_module_long_audio_test.mp3"
+local APP_ICON_RESOURCE = SCRIPT_PATH .. "appicon_headphones.bin"
+local APP_ICON_PATH = "/data/canopus/appicon_headphones.bin"
 local INBOX = "/data/canopus/inbox/"
 local RECEIPT_PATH = INBOX .. TOKEN .. ".cmi"
 local MODULE_PATH = INBOX .. TOKEN .. ".ko"
@@ -80,6 +82,29 @@ local function u32(data, offset)
     return a + b * 0x100 + c * 0x10000 + d * 0x1000000
 end
 
+local function stage_app_icon()
+    local content = read_all(APP_ICON_RESOURCE)
+    if type(content) ~= "string" or #content < 12
+        or content:byte(1) ~= 0x19 or content:byte(2) ~= 0x10
+        or u16(content, 4) == nil or u16(content, 6) == nil
+        or u16(content, 8) ~= u16(content, 4) * 4
+        or u16(content, 10) ~= 0
+        or #content ~= 12 + u16(content, 4) * u16(content, 6) * 4 then
+        return false, "Missing or invalid headphones icon"
+    end
+    local probe = io.open(APP_ICON_PATH, "wb")
+    if probe then probe:close() else
+        os.execute("mkdir /data/canopus")
+    end
+    if not write_all(APP_ICON_PATH, content) then
+        return false, "Cannot stage headphones icon"
+    end
+    if read_all(APP_ICON_PATH) ~= content then
+        return false, "Headphones icon verification failed"
+    end
+    return true
+end
+
 local function fail(message)
     status:set { text = "Install failed\n\n" .. tostring(message)
         .. "\n\nThis installer was kept for diagnostics." }
@@ -107,6 +132,8 @@ local function stage_files()
     if first ~= 0xFF or not second or second < 0xE0 then
         return false, "Invalid long MP3 test resource"
     end
+    local icon_ok, icon_error = stage_app_icon()
+    if not icon_ok then return false, icon_error end
     local probe = io.open(RECEIPT_PATH, "wb")
     if probe then probe:close() else
         os.execute("mkdir /data/canopus")

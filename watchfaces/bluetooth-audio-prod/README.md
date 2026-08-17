@@ -37,8 +37,26 @@ bluetooth-audio-xiaomi-band-10-pro-3.101.036.cmi.bin
 
 The `.cmi.bin` suffix is intentional: the watchface packager accepts the
 resource as a binary file. Lua reads it and writes the receipt to the device-side
-`/data/canopus/inbox/bluetooth_audio.cmi` path.
-and module SHA-256. The generated payloads are ignored by Git.
+`/data/canopus/inbox/bluetooth_audio.cmi` path. Each CMI1 receipt binds its own
+exact target ID, firmware SHA-256, artifact size, and module SHA-256. The generated
+payloads are ignored by Git.
+
+Both this directory and the development installer carry the same
+`appicon_headphones.bin` (117×117 LVGL v9 ARGB8888 with alpha, 54,768 bytes).
+Lua stages it before INSTALL at `/data/canopus/appicon_headphones.bin`; the
+native Headphones app uses that path when it registers its Launcher entry. To
+regenerate the binary from `watchfaces/appicon_headphones.png`, use:
+
+```sh
+python3 /Volumes/EXT0/LVGLImage.py \
+  --ofmt BIN --cf ARGB8888 --compress NONE --align 1 \
+  -o watchfaces/bluetooth-audio watchfaces/appicon_headphones.png
+cp watchfaces/bluetooth-audio/appicon_headphones.bin \
+   watchfaces/bluetooth-audio-prod/appicon_headphones.bin
+```
+
+If an older module was already installed before this icon was added, open the
+installer once to restage the icon before rerunning native app registration.
 
 ## Production differences
 
