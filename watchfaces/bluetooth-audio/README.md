@@ -47,6 +47,23 @@ Overrides:
 
 `module.bin` and `receipt.bin` are build artifacts and are not committed.
 
+The watchface also carries `appicon_headphones.bin`, a 117×117 LVGL v9
+ARGB8888 image with alpha (54,768 bytes). It is staged before INSTALL to
+`/data/canopus/appicon_headphones.bin`, which is the icon path used by the
+native Headphones app. To regenerate it from the tracked source:
+
+```sh
+python3 /Volumes/EXT0/LVGLImage.py \
+  --ofmt BIN --cf ARGB8888 --compress NONE --align 1 \
+  -o watchfaces/bluetooth-audio watchfaces/appicon_headphones.png
+cp watchfaces/bluetooth-audio/appicon_headphones.bin \
+   watchfaces/bluetooth-audio-prod/appicon_headphones.bin
+```
+
+If an older module was already installed before this icon was added, open this
+installer once to restage the icon before running the native app registration
+stages again.
+
 ## Install on device
 
 1. Build the watchface payloads (above).

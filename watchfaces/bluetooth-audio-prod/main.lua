@@ -10,6 +10,8 @@ local FIRMWARE_VERSION_OUTPUT = "/data/bluetooth-audio-installer-version.tmp"
 local INBOX = "/data/canopus/inbox/"
 local RECEIPT_PATH = INBOX .. TOKEN .. ".cmi"
 local MODULE_PATH = INBOX .. TOKEN .. ".ko"
+local APP_ICON_RESOURCE = SCRIPT_PATH .. "appicon_headphones.bin"
+local APP_ICON_PATH = "/data/canopus/appicon_headphones.bin"
 local CPC2_MAGIC = 0x43504332
 local CPC1_MAGIC = 0x43504331
 local CPS1_MAGIC = 0x43505331
@@ -98,6 +100,29 @@ local function fixed_string(data, offset, length)
     return value
 end
 
+local function stage_app_icon()
+    local content = read_all(APP_ICON_RESOURCE)
+    if type(content) ~= "string" or #content < 12
+        or content:byte(1) ~= 0x19 or content:byte(2) ~= 0x10
+        or u16(content, 4) == nil or u16(content, 6) == nil
+        or u16(content, 8) ~= u16(content, 4) * 4
+        or u16(content, 10) ~= 0
+        or #content ~= 12 + u16(content, 4) * u16(content, 6) * 4 then
+        return false, "Missing or invalid headphones icon"
+    end
+    local probe = io.open(APP_ICON_PATH, "wb")
+    if probe then probe:close() else
+        os.execute("mkdir /data/canopus")
+    end
+    if not write_all(APP_ICON_PATH, content) then
+        return false, "Cannot stage headphones icon"
+    end
+    if read_all(APP_ICON_PATH) ~= content then
+        return false, "Headphones icon verification failed"
+    end
+    return true
+end
+
 local function detect_firmware_version()
     local command = string.format("getprop %s > %s",
         shell_quote(FIRMWARE_VERSION_PROPERTY),
@@ -144,6 +169,8 @@ local function stage_files(target, receipt_resource, module_resource)
     if u32(receipt, 24) ~= #module then
         return false, "Receipt artifact size mismatch"
     end
+    local icon_ok, icon_error = stage_app_icon()
+    if not icon_ok then return false, icon_error end
     local probe = io.open(RECEIPT_PATH, "wb")
     if probe then probe:close() else
         os.execute("mkdir /data/canopus")

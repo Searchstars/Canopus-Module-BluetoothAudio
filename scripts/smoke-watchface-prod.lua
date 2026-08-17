@@ -45,6 +45,11 @@ local function le32(value)
         math.floor(value / 65536) % 256, math.floor(value / 16777216) % 256)
 end
 
+local function icon_fixture()
+    return string.char(0x19, 0x10, 0, 0, 2, 0, 2, 0, 8, 0, 0, 0)
+        .. string.rep("\0", 16)
+end
+
 local function pad(value, length)
     assert(#value <= length)
     return value .. string.rep("\0", length - #value)
@@ -91,6 +96,10 @@ local function installer_io(version, fault)
     end
 
     local state = { files = files, opened = {}, commands = {}, request = nil }
+    files["/fake/appicon_headphones.bin"] = icon_fixture()
+    if fault == "missing_icon" then
+        files["/fake/appicon_headphones.bin"] = nil
+    end
     local function open(path, mode)
         state.opened[path] = (state.opened[path] or 0) + 1
         if path == "/dev/canopus" then
@@ -219,7 +228,8 @@ local function check(path, name, version, fault, expect_request)
             or state.request:byte(17) ~= 2
             or state.request:sub(-#suffix) ~= suffix
             or state.files["/data/canopus/inbox/" .. TOKEN .. ".cmi"] == nil
-            or state.files["/data/canopus/inbox/" .. TOKEN .. ".ko"] == nil then
+            or state.files["/data/canopus/inbox/" .. TOKEN .. ".ko"] == nil
+            or state.files["/data/canopus/appicon_headphones.bin"] ~= icon_fixture() then
             print("INSTALL FLOW FAIL:", name)
             return false
         end
@@ -256,6 +266,7 @@ local cases = {
     { "missing-receipt", "3.101.036", "missing_receipt", false },
     { "cross-target-receipt", "3.101.030", "wrong_pair", false },
     { "invalid-module", "3.101.036", "invalid_module", false },
+    { "missing-icon", "3.101.030", "missing_icon", false },
     { "short-supervisor-write", "3.101.030", "short_write", true },
     { "stale-supervisor-response", "3.101.036", "stale_response", true },
 }
