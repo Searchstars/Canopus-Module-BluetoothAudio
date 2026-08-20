@@ -25,8 +25,8 @@ pub fn device_key(address: crate::Address) -> u32 {
 
 pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
     let mut tree = Tree::begin();
-    tree.navigation_page(1, "Headphones")?;
-    tree.section(10, "Connected headset")?;
+    tree.navigation_page(1, "耳机")?;
+    tree.section(10, "已连接耳机")?;
     match model.connected {
         Some(peer) => tree.action_row(
             11,
@@ -35,7 +35,7 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
             EVENT_CONNECTED_DETAIL,
             true,
         )?,
-        None => tree.status_row(11, "Headset", connection_detail(model.connection))?,
+        None => tree.status_row(11, "耳机", connection_detail(model.connection))?,
     }
     if model.last_error != 0 {
         let error = number(model.last_error);
@@ -51,18 +51,18 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
         tree.text(13, diagnostic.as_str(), TextStyle::Description)?;
     }
     tree.end()?;
-    tree.section(20, "Nearby headsets")?;
+    tree.section(20, "附近耳机")?;
     tree.button(
         21,
         if matches!(model.scan, ScanState::Scanning | ScanState::Starting) {
-            "Stop scan"
+            "停止扫描"
         } else {
-            "Start scan"
+            "开始扫描"
         },
         EVENT_SCAN,
         true,
     )?;
-    tree.status_row(22, "Scan", scan_detail(model.scan))?;
+    tree.status_row(22, "扫描", scan_detail(model.scan))?;
     for (index, device) in model.devices.entries().iter().enumerate() {
         let key = device_key(device.address);
         let event = EVENT_DEVICE_BASE + index as u32;
@@ -77,14 +77,10 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
     }
     if model.devices.dropped() != 0 {
         let mut text = FixedText::<48>::default();
-        let _ = write!(
-            text,
-            "{} more results could not be retained",
-            model.devices.dropped()
-        );
+        let _ = write!(text, "还有 {} 个结果无法保留", model.devices.dropped());
         tree.text(30, text.as_str(), TextStyle::Description)?;
     }
-    tree.button(31, "Refresh results", EVENT_REFRESH, true)?;
+    tree.button(31, "刷新结果", EVENT_REFRESH, true)?;
     tree.end()?;
     tree.end()?;
     tree.commit()
@@ -92,24 +88,24 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
 
 pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     let mut tree = Tree::begin();
-    tree.navigation_page(1, "Headset details")?;
+    tree.navigation_page(1, "耳机详情")?;
     let Some(peer) = model.connected else {
-        tree.text(10, "No headset connected", TextStyle::Description)?;
+        tree.text(10, "未连接耳机", TextStyle::Description)?;
         tree.end()?;
         return tree.commit();
     };
-    tree.section(20, "Headset")?;
-    tree.status_row(21, "Name", display_name(&peer.name))?;
+    tree.section(20, "耳机")?;
+    tree.status_row(21, "名称", display_name(&peer.name))?;
     let address = peer.address.text();
-    tree.status_row(22, "Address", address.as_str())?;
+    tree.status_row(22, "地址", address.as_str())?;
     let rssi = number(peer.rssi);
-    tree.status_row(23, "Signal", rssi.as_str())?;
+    tree.status_row(23, "信号", rssi.as_str())?;
     let cod = hex(model.connected.unwrap().class_of_device);
-    tree.status_row(24, "Class", cod.as_str())?;
-    tree.status_row(25, "Connection", connection_detail(model.connection))?;
-    tree.status_row(26, "Stream", stream_detail(model.stream))?;
+    tree.status_row(24, "类别", cod.as_str())?;
+    tree.status_row(25, "连接", connection_detail(model.connection))?;
+    tree.status_row(26, "音频流", stream_detail(model.stream))?;
     tree.end()?;
-    tree.section(30, "Audio")?;
+    tree.section(30, "音频")?;
     let mut mtu = FixedText::<32>::default();
     let _ = write!(
         mtu,
@@ -207,18 +203,13 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
     {
         let can_play =
             model.connection == ConnectionState::Ready && model.stream == crate::StreamState::Open;
-        tree.button(34, "Play test tone", EVENT_TEST_TONE, can_play)?;
-        tree.button(35, "Play long MP3", EVENT_LONG_MP3, can_play)?;
-        tree.button(
-            44,
-            "Decode long MP3 only",
-            EVENT_LONG_MP3_DECODE_ONLY,
-            can_play,
-        )?;
+        tree.button(34, "播放测试音调", EVENT_TEST_TONE, can_play)?;
+        tree.button(35, "播放长 MP3", EVENT_LONG_MP3, can_play)?;
+        tree.button(44, "仅解码长 MP3", EVENT_LONG_MP3_DECODE_ONLY, can_play)?;
     }
     tree.button(
         36,
-        "Disconnect",
+        "断开连接",
         EVENT_DISCONNECT,
         model.connection == ConnectionState::Ready,
     )?;
@@ -253,46 +244,46 @@ fn pairing_diagnostic(model: &Model) -> FixedText<32> {
 
 fn display_name(name: &crate::DeviceName) -> &str {
     if name.is_empty() {
-        "Unknown headset"
+        "未知耳机"
     } else {
         name.as_str()
     }
 }
 fn scan_detail(state: ScanState) -> &'static str {
     match state {
-        ScanState::Idle => "Idle",
-        ScanState::Starting => "Starting…",
-        ScanState::Scanning => "Scanning…",
-        ScanState::Stopping => "Stopping…",
-        ScanState::Failed => "Scan failed",
+        ScanState::Idle => "空闲",
+        ScanState::Starting => "正在启动…",
+        ScanState::Scanning => "正在扫描…",
+        ScanState::Stopping => "正在停止…",
+        ScanState::Failed => "扫描失败",
     }
 }
 fn connection_detail(state: ConnectionState) -> &'static str {
     match state {
-        ConnectionState::Disconnected => "Not connected",
-        ConnectionState::WaitingForScanStop => "Preparing…",
-        ConnectionState::CheckingBond => "Checking…",
-        ConnectionState::RemovingBond => "Clearing…",
-        ConnectionState::Pairing => "Pairing…",
-        ConnectionState::Connecting => "Connecting…",
-        ConnectionState::Configuring => "Audio setup…",
-        ConnectionState::Ready => "Connected",
-        ConnectionState::Disconnecting => "Disconnecting…",
-        ConnectionState::Failed => "Failed",
+        ConnectionState::Disconnected => "未连接",
+        ConnectionState::WaitingForScanStop => "准备中…",
+        ConnectionState::CheckingBond => "检查配对中…",
+        ConnectionState::RemovingBond => "清除配对中…",
+        ConnectionState::Pairing => "配对中…",
+        ConnectionState::Connecting => "连接中…",
+        ConnectionState::Configuring => "音频设置中…",
+        ConnectionState::Ready => "已连接",
+        ConnectionState::Disconnecting => "正在断开连接…",
+        ConnectionState::Failed => "失败",
     }
 }
 fn stream_detail(state: crate::StreamState) -> &'static str {
     match state {
-        crate::StreamState::Idle => "Idle",
-        crate::StreamState::Discovering => "Discovering",
-        crate::StreamState::ReadingCapabilities => "Reading capabilities",
-        crate::StreamState::Configuring => "Configuring",
-        crate::StreamState::Opening => "Opening",
-        crate::StreamState::Open => "Ready",
-        crate::StreamState::Starting => "Starting",
-        crate::StreamState::Streaming => "Playing audio",
-        crate::StreamState::Suspending => "Stopping",
-        crate::StreamState::Failed => "Failed",
+        crate::StreamState::Idle => "空闲",
+        crate::StreamState::Discovering => "正在发现",
+        crate::StreamState::ReadingCapabilities => "正在读取能力",
+        crate::StreamState::Configuring => "配置中",
+        crate::StreamState::Opening => "打开中",
+        crate::StreamState::Open => "就绪",
+        crate::StreamState::Starting => "启动中",
+        crate::StreamState::Streaming => "正在播放音频",
+        crate::StreamState::Suspending => "停止中",
+        crate::StreamState::Failed => "失败",
     }
 }
 

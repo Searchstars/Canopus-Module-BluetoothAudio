@@ -13,6 +13,11 @@ fn device(id: u8, rssi: i32, cod: u32) -> DiscoveredDevice {
 }
 
 #[test]
+fn invalid_names_use_chinese_fallback() {
+    assert_eq!(DeviceName::from_bytes(&[0xff]).as_str(), "未知耳机");
+}
+
+#[test]
 fn deduplicates_and_refreshes_results() {
     let mut table = DiscoveryTable::default();
     let epoch = table.begin_scan();

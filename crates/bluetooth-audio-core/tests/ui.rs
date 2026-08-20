@@ -10,8 +10,8 @@ fn overview_always_has_connected_headset_row() {
     let model = Model::default();
     let snapshot = ui::overview(&model).unwrap();
     let row = snapshot.find_by_key(11).unwrap();
-    assert_eq!(snapshot.primary(row), "Headset");
-    assert_eq!(snapshot.secondary(row), "Not connected");
+    assert_eq!(snapshot.primary(row), "耳机");
+    assert_eq!(snapshot.secondary(row), "未连接");
 }
 #[test]
 fn overview_renders_all_retained_results_within_capacity() {

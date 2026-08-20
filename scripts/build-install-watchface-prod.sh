@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds one production installer watchface containing exact payload pairs for
-# Xiaomi Band 10 Pro firmware 3.101.030 and 3.101.036.
+# Xiaomi Band 10 Pro firmware 3.101.030, 3.101.036, and 3.101.043.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -10,7 +10,8 @@ mkdir -p "$WATCHFACE"
 
 set -- \
   xiaomi-band-10-pro-3.101.030 \
-  xiaomi-band-10-pro-3.101.036
+  xiaomi-band-10-pro-3.101.036 \
+  xiaomi-band-10-pro-3.101.043
 for TARGET_ID do
   rm -f "$WATCHFACE/bluetooth-audio-$TARGET_ID.cmi"
 done
@@ -30,7 +31,8 @@ done
 
 python3 - "$ROOT" "$CANOPUS" "$WATCHFACE" \
   xiaomi-band-10-pro-3.101.030 \
-  xiaomi-band-10-pro-3.101.036 <<'PY'
+  xiaomi-band-10-pro-3.101.036 \
+  xiaomi-band-10-pro-3.101.043 <<'PY'
 import hashlib, pathlib, struct, sys, tomllib
 root = pathlib.Path(sys.argv[1])
 canopus = pathlib.Path(sys.argv[2])
@@ -48,8 +50,8 @@ for target in targets:
     assert len(module) >= 512 and len(module) <= 262144
     assert module[:7] == b"\x7fELF\x01\x01\x01"
     assert struct.unpack_from("<HH", module, 16) == (1, 40)
-    for removed_label in (b"Play test tone", b"Play long MP3", b"Decode long MP3 only"):
-        assert removed_label not in module, (target, removed_label)
+    for removed_label in ("播放测试音调", "播放长 MP3", "仅解码长 MP3"):
+        assert removed_label.encode("utf-8") not in module, (target, removed_label)
     assert len(receipt) == 256 and receipt[:4] == b"CMI1"
     magic, version, header, _flags, lifecycle, module_version, artifact_size, _reserved = struct.unpack(
         "<8I", receipt[:32]

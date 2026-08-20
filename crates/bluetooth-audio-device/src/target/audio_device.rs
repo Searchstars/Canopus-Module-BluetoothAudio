@@ -125,7 +125,8 @@ pub fn register() -> Result<(), i32> {
     };
     #[cfg(any(
         feature = "target-xiaomi-band-10-pro-3-101-030",
-        feature = "target-xiaomi-band-10-pro-3-101-036"
+        feature = "target-xiaomi-band-10-pro-3-101-036",
+        feature = "target-xiaomi-band-10-pro-3-101-043"
     ))]
     let operations = file_operations {
         open: audio_open as *const () as *mut c_void,
