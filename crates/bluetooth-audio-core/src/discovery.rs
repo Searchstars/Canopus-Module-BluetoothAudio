@@ -31,7 +31,7 @@ impl DeviceName {
     }
 
     pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("Unknown headset")
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("未知耳机")
     }
 
     pub const fn is_empty(&self) -> bool {

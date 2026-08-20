@@ -11,6 +11,7 @@ canopus_abi = "1"
 include = [
   "xiaomi-band-10-pro-3.101.030",
   "xiaomi-band-10-pro-3.101.036",
+  "xiaomi-band-10-pro-3.101.043",
   "xiaomi-band-9-pro-3.1.175",
 ]
 
@@ -31,6 +32,6 @@ required = [
 [native_app]
 enabled = true
 app_id = "org.canopus.bluetooth-audio"
-name = "Headphones"
+name = "耳机"
 entry = "canopus_module_descriptor"
 role = "standalone"
