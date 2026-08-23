@@ -1,6 +1,7 @@
-//! Target-selected private backend. The current build profile selects
-//! `xiaomi-band-10-pro-3.101.030`; future profiles select sibling private ABI
-//! implementations without changing this module logic.
+//! `xiaomi-band-10-pro-3.101.036` and `xiaomi-band-10-pro-3.101.043`; candidate
+//! profiles select the fail-closed static facade until their private ABI gates
+//! are approved. Each backend is selected by one mutually exclusive target
+//! feature and carries its own firmware identity policy.
 //!
 //! These APIs are not part of the public, audited `canopus-target-generated`
 //! bindings; every absolute address and ABI record lives in the target-private
@@ -35,8 +36,8 @@ use canopus_target_private::*;
 
 use canopus_bluetooth_audio_core::{
     ConnectionState, PAIR_DIAG_BONDED, PAIR_DIAG_DISPLAY, PAIR_DIAG_FILTER_HIT,
-    PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST,
-    StreamState, ui,
+    PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_MHDT_INSTALLED, PAIR_DIAG_REMOVE_CONFIRMED,
+    PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST, StreamState, ui,
 };
 
 use runtime::*;
@@ -188,6 +189,7 @@ fn sync_target_model(core: &mut Core) {
     let mut pairing_flags = 0u8;
     for (runtime_flag, diagnostic_flag) in [
         (FLAG_CORE_FILTER_HIT, PAIR_DIAG_FILTER_HIT),
+        (FLAG_HCI_COMPAT_INSTALLED, PAIR_DIAG_MHDT_INSTALLED),
         (FLAG_HCI_COMPAT_HIT, PAIR_DIAG_MHDT_FIXED),
         (FLAG_PAIR_REQUEST_SEEN, PAIR_DIAG_REQUEST),
         (FLAG_PAIR_DISPLAY_SEEN, PAIR_DIAG_DISPLAY),

@@ -22,16 +22,20 @@ __attribute__((section(".rodata.analysis_consts_fixed8_simd_even"), used,
                aligned(4)))
 const uint8_t canopus_analysis_consts_fixed8_simd_even_anchor[4] = {0};
 
+#if !CANOPUS_STATIC_CANDIDATE
 extern void canopus_decode_opaque_words(void) __attribute__((weak));
+#endif
 
 __attribute__((constructor)) static void canopus_mod_ctor(void)
 {
     extern int canopus_mod_prepare(const void *);
     extern int canopus_register_module_descriptor(void);
 
+#if !CANOPUS_STATIC_CANDIDATE
     if (canopus_decode_opaque_words != 0) {
         canopus_decode_opaque_words();
     }
+#endif
     (void)canopus_mod_prepare(0);
     (void)canopus_register_module_descriptor();
 }

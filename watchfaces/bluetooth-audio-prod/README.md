@@ -29,10 +29,10 @@ The command builds, verifies, and signs both targets, then stages these generate
 resources beside `main.lua`:
 
 ```text
-bluetooth-audio-xiaomi-band-10-pro-3.101.030.bin
-bluetooth-audio-xiaomi-band-10-pro-3.101.030.cmi.bin
 bluetooth-audio-xiaomi-band-10-pro-3.101.036.bin
 bluetooth-audio-xiaomi-band-10-pro-3.101.036.cmi.bin
+bluetooth-audio-xiaomi-band-10-pro-3.101.043.bin
+bluetooth-audio-xiaomi-band-10-pro-3.101.043.cmi.bin
 ```
 
 The `.cmi.bin` suffix is intentional: the watchface packager accepts the

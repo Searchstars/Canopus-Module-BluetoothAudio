@@ -6,6 +6,7 @@ pub mod address;
 pub mod audio_input;
 pub mod avdtp;
 pub mod avrcp;
+pub mod compatibility;
 pub mod controller;
 pub mod discovery;
 pub mod media;

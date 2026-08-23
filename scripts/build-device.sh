@@ -2,7 +2,7 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 CANOPUS=${CANOPUS_ROOT:-"$ROOT/../Canopus"}
-TARGET_ID=${CANOPUS_TARGET:-xiaomi-band-10-pro-3.101.030}
+TARGET_ID=${CANOPUS_TARGET:-xiaomi-band-10-pro-3.101.036}
 TARGET_PROFILE="$ROOT/targets/$TARGET_ID.env"
 [ -f "$TARGET_PROFILE" ] || {
   echo "error: unsupported module target: $TARGET_ID" >&2
@@ -10,6 +10,7 @@ TARGET_PROFILE="$ROOT/targets/$TARGET_ID.env"
 }
 # Repository-owned profile: Rust feature, LLVM target, CPU, and loader bound.
 . "$TARGET_PROFILE"
+export CANOPUS_STATIC_CANDIDATE="${CANOPUS_STATIC_CANDIDATE:-0}"
 OUT=${CANOPUS_BUILD_OUT:-"$ROOT/build/$TARGET_ID"}
 TRIPLE=$RUST_TARGET_TRIPLE
 CC=${CC:-clang}
@@ -48,6 +49,7 @@ RUSTFLAGS="$LEAN_RUSTFLAGS" $NIGHTLY build \
   -fno-unwind-tables -fno-asynchronous-unwind-tables \
   -fdata-sections -ffunction-sections -Os -Wall -Wextra -Werror \
   -I"$CANOPUS/sdk/c" \
+  -DCANOPUS_STATIC_CANDIDATE="$CANOPUS_STATIC_CANDIDATE" \
   -c "$ROOT/crates/bluetooth-audio-device/c_shim/canopus_ctor.c" \
   -o "$OUT/canopus_ctor.o"
 "$ROOT/scripts/compile-sbc.sh" "$OUT" "$CC" "$RUST_TARGET_CPU"

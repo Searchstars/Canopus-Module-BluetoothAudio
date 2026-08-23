@@ -9,7 +9,7 @@ use core::{
 use canopus_bluetooth_audio_core::audio_input::{
     ABI_VERSION, AudioInput, FormatV1, InputError, StatusV1,
 };
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "device")]
 use canopus_target_private::canopus_fw_register_driver;
 use canopus_target_private::{
     O_RDWR, bt_alloc, bt_free, file_operations, get_errno, nuttx_close, nuttx_ioctl, nuttx_open,
@@ -18,7 +18,7 @@ use canopus_target_private::{
 use super::{audio_stream, transport};
 
 const DEVICE_PATH: &[u8] = b"/dev/canopus_audio\0";
-#[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+#[cfg(feature = "device")]
 const DEVICE_MODE: u32 = 0o666;
 pub const INPUT_CAPACITY: usize = 16 * 1024;
 
@@ -123,11 +123,7 @@ pub fn register() -> Result<(), i32> {
         ioctl: audio_ioctl as *const () as *mut c_void,
         _tail: [0; 24],
     };
-    #[cfg(any(
-        feature = "target-xiaomi-band-10-pro-3-101-030",
-        feature = "target-xiaomi-band-10-pro-3-101-036",
-        feature = "target-xiaomi-band-10-pro-3-101-043"
-    ))]
+    #[cfg(feature = "device")]
     let operations = file_operations {
         open: audio_open as *const () as *mut c_void,
         close: audio_close as *const () as *mut c_void,
@@ -137,33 +133,11 @@ pub fn register() -> Result<(), i32> {
         ioctl: audio_ioctl as *const () as *mut c_void,
         _tail: [0; 24],
     };
-    #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-    let operations = file_operations {
-        open: audio_open as *const () as *mut c_void,
-        close: audio_close as *const () as *mut c_void,
-        read: audio_read as *const () as *mut c_void,
-        write: audio_write as *const () as *mut c_void,
-        lseek: core::ptr::null_mut(),
-        ioctl: audio_ioctl as *const () as *mut c_void,
-        _pad_18: [0; 8],
-        fsync: core::ptr::null_mut(),
-        _tail: [0; 12],
-    };
     let operations_ptr = core::ptr::addr_of_mut!(FILE_OPERATIONS).cast::<file_operations>();
     // SAFETY: activation is single-threaded and this resident table is written
     // once before register_driver publishes its address.
     unsafe { operations_ptr.write(operations) };
-    #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-    let result = unsafe {
-        // Band-9 register_driver is 3-arg (no mode_t); the driver is registered
-        // on the band-9 NuttX variant with a NULL private argument.
-        canopus_target_private::canopus_fw_register_driver_b9(
-            DEVICE_PATH.as_ptr(),
-            operations_ptr.cast(),
-            core::ptr::null_mut(),
-        )
-    };
-    #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
+    #[cfg(feature = "device")]
     let result = unsafe {
         canopus_fw_register_driver(
             DEVICE_PATH.as_ptr(),

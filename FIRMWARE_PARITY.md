@@ -1,9 +1,8 @@
-# Firmware 3.101.030 Bluetooth path parity
+# Firmware parity reference
 
-This module targets only `xiaomi-band-10-pro-3.101.030`. The working reference is
-`/Volumes/EXT0/firmware_latest/native`, whose Phase 5/6 device run completed fresh
-Classic pairing, two outbound L2CAP channels, AVDTP negotiation, and a five-second
-SBC stream.
+This document records the historical 3.101.030 Bluetooth path used while the
+036 implementation was being established. 3.101.030 is no longer a supported
+build target; active module builds are 3.101.036 and 3.101.043.
 
 ## Authoritative sequence
 
@@ -17,7 +16,7 @@ SBC stream.
 | Remove retained Classic record | `0x0C3A028D(address, 1)` | `prepare_fresh_bond` |
 | Removal commit | matching bond callback `(transport=1, state=0)` | `CORE_EVENT_REMOVE_OK` |
 | Make adapter bondable | `set_scan_mode(current_mode, 1)` | `submit_bond` |
-| Install target-only policy filter | mirror 16 callbacks; replace slot 5 only | `install_core_pair_filter` |
+| Install transaction Pair Request filter | mirror 16 callbacks; replace slot 5 only | `install_core_pair_filter` |
 | Create fresh Classic bond | `0x0C3A01A9(address, 1)` | `submit_bond` |
 | Pair Request reply | `0x0C39988D(adapter, address, 1)` | `on_pair_request` |
 | Numeric comparison reply | `0x0C3998C9(adapter, address, 1, 1)` | `on_pair_display` |
@@ -73,23 +72,32 @@ encryption, and the final BONDED callback.
   candidate retains the MTU fix required by the stock connect ABI but leaves
   both outbound Information Responses stock, avoiding unnecessary global
   capability changes.
-- The GAP receive callback slot at `0x20137EA4` normally contains stock Thumb
-  dispatcher `0x0C7D3E0D`. The boot-resident wrapper compare-checks that
-  writable slot and filters only the exact BES mHDT peer-capability option
-  `7F 01 01` from a Configuration Request whose destination CID is one of this
-  module's live AVDTP channels. It repairs the HCI ACL, L2CAP,
-  signaling-command, and forwarded packet lengths, then lets the unmodified
-  stock parser process the remaining MTU option and complete its normal channel
-  state transition. It neither advertises local mHDT support nor enables mHDT
-  controller mode. The observed failing packet is a complete PB=2 ACL start
-  packet with a 19-byte ACL payload; continuation fragments are forwarded
-  untouched and are not misparsed as L2CAP headers. The module reasserts the
-  receive hook at adapter ON and before discovery/bond/connect because the
-  power-on path reconstructs the dispatcher. A successful rewrite sets the
-  retained UI diagnostic `mhdt-fixed`, so device validation does not depend on
-  where btsnoop is tapped. The previously tested
-  `/dev/ttyBT0` callback at `0x200ED89C + 8` and GAP send slot `0x2013807C` are
-  intentionally left stock.
+- The 036 GAP receive callback slot at `0x20137EA4` normally contains stock
+  Thumb dispatcher `0x0C7D3E0D`. Exact 043 instead resolves firmware-owned
+  `owner = *(void **)0x2013BDB4`, `state = *(void **)owner`, and the separately
+  allocated callback cell at `*(void ***)(state + 0x28)`; its stock callable is
+  `0x0C7EC47D`. Target-private backends own only this exact writable seam, the
+  stock/replacement compare guard, and power-transition ownership. They do not
+  own mHDT policy or packet parsing.
+- The portable compatibility layer requires that seam on every runtime-capable
+  target and fails closed with `ERR_HCI_POLICY` when it is unavailable. It learns
+  the local dynamic CID directly from a successful inbound L2CAP Connection
+  Response, so the following peer Configuration Request need not wait for a
+  firmware connection-confirm callback. For the matching signaling or media
+  transaction only, it removes exact BES mHDT option `7F 01 01`, repairs the HCI
+  ACL, L2CAP, signaling-command, and forwarded packet lengths, then lets the
+  unmodified stock parser process the remaining MTU option and complete its
+  normal channel transition. It neither rewrites unrelated dynamic channels,
+  advertises local mHDT support, nor enables mHDT controller mode. The observed
+  packet is a complete PB=2 ACL start packet with a 19-byte ACL payload;
+  continuation fragments are forwarded untouched and are not misparsed as L2CAP
+  headers.
+- The module clears its CID hints for each new signaling/media connect and
+  reasserts the receive hook at adapter ON and before discovery, bond, or connect
+  because the power-on path reconstructs the dispatcher. Diagnostic bit `0x80`
+  records successful hook installation independently of bit `0x40`, which
+  records an actual mHDT rewrite. The previously tested `/dev/ttyBT0` callback at
+  `0x200ED89C + 8` and GAP send slot `0x2013807C` remain stock.
 - L2CAP callback events: 2 confirm, 3 complete, 4/5 informational, 6 disconnect,
   7 data, 8 flow telemetry.
 - L2CAP completion fields: MTU at offset 72 and CID at offset 108.
@@ -220,6 +228,32 @@ These do not replace firmware ordering or pairing behavior:
 - UI updates run on a page-owned LVGL timer and retain the existing content root,
   rows, labels, and semantic address keys.
 
+## Exact 3.101.043 retest status
+
+The reported `Bond 3/2 0F -1105` proves Classic bonding completed, but the old
+build recorded no `0x40` rewrite before the later `ERR_REMOTE`. The compact line
+cannot distinguish an AVDTP Reject from a non-clean signaling disconnect. The
+host-fixed exact 043 artifact is:
+
+```text
+build/xiaomi-band-10-pro-3.101.043/bluetooth-audio.elf
+SHA-256 5844f0fc90aa3aeab9761349ed767f90bbf31f6b17444886c3dfc2506b320b62
+```
+
+Its verifier result is PASS with 188 sections, zero undefined symbols, 1,377
+relocations, one constructor, one destructor, and 119,025 loaded bytes. This is
+host evidence only. A clean reboot is required before a retest so an older
+resident module or callback replacement cannot survive in the observation.
+The new compact diagnostics mean:
+
+- `Bond 3/2 8F`: hook installed, no mHDT rewrite observed;
+- `Bond 3/2 CF`: hook installed and exact mHDT option rewritten;
+- `-1109`: exact raw-H4 hook installation failed closed;
+- `Bond 3/2 CF -1105`: execution passed mHDT compatibility and the remaining
+  failure needs a separate AVDTP Reject versus disconnect-stage diagnosis.
+
+No 043 device-success conclusion is recorded until that retest exists.
+
 ## Remaining device gates
 
 Static analysis and host tests cannot prove controller/air behavior. Before this
@@ -231,12 +265,14 @@ path is considered device-verified, a run must observe in order:
 4. Pair Request filter hit;
 5. Pair Request and Pair Display callbacks;
 6. link-key/authentication/encryption completion and Classic BONDED callback;
-7. signaling CID/MTU and first DISCOVER;
-8. SET CONFIGURATION and OPEN;
-9. media CID/MTU and START;
-10. 345 RTP/SBC packets, presentation drain, and reusable active stream;
-11. clean media and signaling disconnect callbacks;
-12. a second complete fresh-pair run without a stale callback changing the new
+7. raw-H4 compatibility hook installed (`0x80`), successful wire Connection
+   Response CID learning, and exact mHDT rewrite when present (`0x40`);
+8. signaling CID/MTU and first DISCOVER;
+9. SET CONFIGURATION and OPEN;
+10. media CID/MTU and START;
+11. 345 RTP/SBC packets, presentation drain, and reusable active stream;
+12. clean media and signaling disconnect callbacks;
+13. a second complete fresh-pair run without a stale callback changing the new
     session.
 
 A retained-bond fast reconnect option is intentionally absent until repeated

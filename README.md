@@ -7,10 +7,14 @@
 
 由于硬件特性限制，每次连接耳机时，都**必须将耳机置于配对模式**。
 
-目前支持的设备/固件版本如下：
-|设备型号|支持的固件版本|备注|
+目前支持的设备/固件版本如下（“编译支持”不等于设备验证或生产批准）：
+|设备型号|固件版本|状态/备注|
 |-|-|-|
-|小米手环10 Pro|`3.101.036`、`3.101.030`|030仅为理论支持，建议使用036|
+|小米手环10 Pro|`3.101.036`|trusted build target|
+|小米手环10 Pro|`3.101.043`|可构建；device gate pending|
+|小米手环9 Pro|`3.1.175`|compile-only static candidate；ABI/LVGL/loader gate pending|
+|小米手环11|`4.100.108`|compile-only static candidate；ABI/LVGL/loader gate pending|
+|小米手环9|`3.1.32`|compile-only static candidate；ABI/LVGL/loader gate pending|
 
 根据测试结果，目前的耳机/音响兼容情况如下：
 
@@ -44,8 +48,8 @@ scripts/build-device.sh
 Rust 私有 ABI 由 `canopus-target-private` facade 的互斥 `target-*` feature 选择。模块构建脚本读取 `targets/<target-id>.env`，由该文件映射 Cargo feature、Rust target triple、CPU 与 loader 大小限制。当前默认值为：
 
 ```sh
-CANOPUS_TARGET=xiaomi-band-10-pro-3.101.030 scripts/build-device.sh
-# 构建 Canopus.toml include 的全部 target：
+CANOPUS_TARGET=xiaomi-band-10-pro-3.101.036 scripts/build-device.sh
+# 构建 Canopus.toml include 的全部 target（036、043 以及三个 compile-only static candidate）：
 scripts/build-targets.sh
 ```
 

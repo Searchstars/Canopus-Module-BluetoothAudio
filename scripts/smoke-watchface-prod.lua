@@ -4,13 +4,13 @@ local DEFAULT = "watchfaces/bluetooth-audio-prod/main.lua"
 local TOKEN = "bluetooth_audio"
 local TEMP = "/data/bluetooth-audio-installer-version.tmp"
 local TARGETS = {
-    ["3.101.030"] = {
-        id = "xiaomi-band-10-pro-3.101.030",
-        firmware = "f701a84ffcafa67f4d4603ad8cd66a11e5442f27140f5af0982e0975dccd225b",
-    },
     ["3.101.036"] = {
         id = "xiaomi-band-10-pro-3.101.036",
         firmware = "662d67f5e247e31e194d3161024890ba93b9d29d70b290fadb9aac8ce8ec3c81",
+    },
+    ["3.101.043"] = {
+        id = "xiaomi-band-10-pro-3.101.043",
+        firmware = "519307675665e4866d722a8119a98589c397b614ac3294cb87bfc86de45756ec",
     },
 }
 
@@ -89,7 +89,7 @@ local function installer_io(version, fault)
     elseif selected and fault == "missing_receipt" then
         files[resource_path(selected, ".cmi.bin")] = nil
     elseif selected and fault == "wrong_pair" then
-        local other = TARGETS[version == "3.101.030" and "3.101.036" or "3.101.030"]
+        local other = TARGETS[version == "3.101.043" and "3.101.036" or "3.101.043"]
         files[resource_path(selected, ".cmi.bin")] = receipt_payload(other)
     elseif selected and fault == "invalid_module" then
         files[resource_path(selected, ".bin")] = "not an ELF module"
@@ -257,17 +257,17 @@ end
 
 local path = arg[1] or DEFAULT
 local cases = {
-    { "firmware-030", "3.101.030", nil, true },
     { "firmware-036", "3.101.036", nil, true },
+    { "firmware-043", "3.101.043", nil, true },
     { "unsupported", "3.101.999", nil, false },
     { "malformed-version", "invalid", nil, false },
-    { "getprop-failed", "3.101.030", "getprop_failed", false },
-    { "missing-module", "3.101.030", "missing_module", false },
+    { "getprop-failed", "3.101.043", "getprop_failed", false },
+    { "missing-module", "3.101.043", "missing_module", false },
     { "missing-receipt", "3.101.036", "missing_receipt", false },
-    { "cross-target-receipt", "3.101.030", "wrong_pair", false },
+    { "cross-target-receipt", "3.101.043", "wrong_pair", false },
     { "invalid-module", "3.101.036", "invalid_module", false },
-    { "missing-icon", "3.101.030", "missing_icon", false },
-    { "short-supervisor-write", "3.101.030", "short_write", true },
+    { "missing-icon", "3.101.043", "missing_icon", false },
+    { "short-supervisor-write", "3.101.043", "short_write", true },
     { "stale-supervisor-response", "3.101.036", "stale_response", true },
 }
 for _, case in ipairs(cases) do
