@@ -275,7 +275,7 @@ impl Runtime {
 }
 
 static mut RUNTIME: core::mem::MaybeUninit<Runtime> = core::mem::MaybeUninit::uninit();
-static mut CALLBACKS: [u32; 16] = [0; 16];
+static mut CALLBACKS: [u32; 17] = [0; 17];
 static CORE_PTR: AtomicUsize = AtomicUsize::new(0);
 static CORE_LOCK: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
@@ -298,7 +298,7 @@ pub fn prepare(generation: u32) {
         core::ptr::addr_of_mut!(RUNTIME)
             .cast::<Runtime>()
             .write(Runtime::const_new(generation));
-        core::ptr::addr_of_mut!(CALLBACKS).write([0; 16]);
+        core::ptr::addr_of_mut!(CALLBACKS).write([0; 17]);
         core_pointer.write(Core::new(generation));
     }
     runtime().adapter_state.store(-1, Ordering::Release);

@@ -1,8 +1,8 @@
 use canopus_bluetooth_audio_core::ui;
 use canopus_bluetooth_audio_core::{
     Address, ConnectionState, DeviceName, DiscoveredDevice, Model, PAIR_DIAG_DISPLAY,
-    PAIR_DIAG_FILTER_HIT, PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REQUEST,
-    StreamState,
+    PAIR_DIAG_FILTER_HIT, PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_MHDT_INSTALLED,
+    PAIR_DIAG_REMOVE_CONFIRMED, PAIR_DIAG_REQUEST, StreamState,
 };
 
 #[test]
@@ -61,12 +61,13 @@ fn overview_exposes_pairing_milestones_without_extra_rows() {
     model.details.device_bond_state = 2;
     model.details.pairing_flags = PAIR_DIAG_REMOVE_CONFIRMED
         | PAIR_DIAG_FILTER_HIT
+        | PAIR_DIAG_MHDT_INSTALLED
         | PAIR_DIAG_MHDT_FIXED
         | PAIR_DIAG_REQUEST
         | PAIR_DIAG_DISPLAY;
     let snapshot = ui::overview(&model).unwrap();
     let diagnostic = snapshot.find_by_key(13).unwrap();
-    assert_eq!(snapshot.primary(diagnostic), "Bond 3/2 · 67");
+    assert_eq!(snapshot.primary(diagnostic), "Bond 3/2 · E7");
 }
 
 #[test]

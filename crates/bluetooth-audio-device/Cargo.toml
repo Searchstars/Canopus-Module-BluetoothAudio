@@ -13,21 +13,25 @@ crate-type = ["staticlib"]
 default = []
 device = ["dep:canopus-target-private"]
 production = ["canopus-bluetooth-audio-core/production"]
-target-xiaomi-band-10-pro-3-101-030 = [
-    "device",
-    "canopus-target-private/target-xiaomi-band-10-pro-3-101-030",
-]
 target-xiaomi-band-10-pro-3-101-036 = [
     "device",
     "canopus-target-private/target-xiaomi-band-10-pro-3-101-036",
+]
+target-xiaomi-band-10-pro-3-101-043 = [
+    "device",
+    "canopus-target-private/target-xiaomi-band-10-pro-3-101-043",
 ]
 target-xiaomi-band-9-pro-3-1-175 = [
     "device",
     "canopus-target-private/target-xiaomi-band-9-pro-3-1-175",
 ]
-target-xiaomi-band-10-pro-3-101-043 = [
+target-xiaomi-band-11-4-100-108 = [
     "device",
-    "canopus-target-private/target-xiaomi-band-10-pro-3-101-043",
+    "canopus-target-private/target-xiaomi-band-11-4-100-108",
+]
+target-xiaomi-band-9-3-1-32 = [
+    "device",
+    "canopus-target-private/target-xiaomi-band-9-3-1-32",
 ]
 
 [dependencies]

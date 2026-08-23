@@ -22,7 +22,6 @@ local HEADER_SIZE = 36
 local RESULT_COMPLETED = 5
 
 local TARGETS = {
-    ["3.101.030"] = { id = "xiaomi-band-10-pro-3.101.030" },
     ["3.101.036"] = { id = "xiaomi-band-10-pro-3.101.036" },
     ["3.101.043"] = { id = "xiaomi-band-10-pro-3.101.043" },
 }

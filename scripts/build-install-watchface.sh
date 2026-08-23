@@ -4,7 +4,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-TARGET_ID=${CANOPUS_TARGET:-xiaomi-band-10-pro-3.101.030}
+TARGET_ID=${CANOPUS_TARGET:-xiaomi-band-10-pro-3.101.036}
 OUT=${CANOPUS_BUILD_OUT:-"$ROOT/build/$TARGET_ID"}
 WATCHFACE="$ROOT/watchfaces/bluetooth-audio"
 mkdir -p "$OUT" "$WATCHFACE"

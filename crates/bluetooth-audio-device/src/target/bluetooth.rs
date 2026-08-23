@@ -13,7 +13,12 @@ use super::{compatibility, volume_store};
 
 pub struct DevicePlatform;
 
-const ERR_CORE_POLICY: i32 = -1107;
+// Pair-filter failures are module-local diagnostics, not firmware return values.
+const ERR_CORE_POLICY: i32 = -1113;
+const ERR_CORE_DESCRIPTOR_UNAVAILABLE: i32 = -1114;
+const ERR_CORE_DESCRIPTOR_MISMATCH: i32 = -1115;
+const ERR_CORE_PAIR_SLOT_MISMATCH: i32 = -1116;
+const ERR_CORE_REGISTRATION: i32 = -1117;
 const BOND_TIMER_EVENT: u8 = 11;
 const BOND_TIMER_REMOVE: u8 = 1;
 const BOND_TIMER_PAIR: u8 = 2;
@@ -55,10 +60,12 @@ fn install_core_pair_filter(_address: [u8; 6]) -> Result<(), i32> {
             Ok(())
         }
         Ok(None) => Ok(()),
+        Err(PairRequestFilterError::Policy) => Err(ERR_CORE_POLICY),
+        Err(PairRequestFilterError::DescriptorUnavailable) => Err(ERR_CORE_DESCRIPTOR_UNAVAILABLE),
+        Err(PairRequestFilterError::DescriptorMismatch) => Err(ERR_CORE_DESCRIPTOR_MISMATCH),
+        Err(PairRequestFilterError::PairSlotMismatch) => Err(ERR_CORE_PAIR_SLOT_MISMATCH),
         Err(PairRequestFilterError::Allocation) => Err(ERR_ALLOC),
-        Err(PairRequestFilterError::Policy | PairRequestFilterError::Registration) => {
-            Err(ERR_CORE_POLICY)
-        }
+        Err(PairRequestFilterError::Registration) => Err(ERR_CORE_REGISTRATION),
     }
 }
 
@@ -719,9 +726,6 @@ unsafe extern "C" fn on_discovery_result(
     let device = DiscoveredDevice {
         address: Address(unsafe { (*result).address }),
         name: DeviceName::from_bytes(name),
-        #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-        rssi: unsafe { (*result).rssi },
-        #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
         rssi: unsafe { (*result).rssi } as i32,
         class_of_device: unsafe { (*result).class_of_device },
         last_seen_epoch: 0,

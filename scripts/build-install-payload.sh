@@ -12,6 +12,7 @@ TARGET_PROFILE="$ROOT/targets/$TARGET_ID.env"
   exit 1
 }
 . "$TARGET_PROFILE"
+export CANOPUS_STATIC_CANDIDATE="${CANOPUS_STATIC_CANDIDATE:-0}"
 
 TARGET_FIRMWARE_SHA256=$(python3 - "$CANOPUS/targets/$TARGET_ID/target.toml" "$TARGET_ID" <<'PY'
 import pathlib, sys, tomllib
@@ -71,6 +72,7 @@ echo "[payload 2/3] link, strip, and verify $TARGET_ID"
   -fno-unwind-tables -fno-asynchronous-unwind-tables \
   -fdata-sections -ffunction-sections -Os -Wall -Wextra -Werror \
   -I"$CANOPUS/sdk/c" \
+  -DCANOPUS_STATIC_CANDIDATE="$CANOPUS_STATIC_CANDIDATE" \
   -c "$ROOT/crates/bluetooth-audio-device/c_shim/canopus_ctor.c" \
   -o "$OUT/canopus_ctor.o"
 "$ROOT/scripts/compile-sbc.sh" "$OUT" "$CC" "$RUST_TARGET_CPU"

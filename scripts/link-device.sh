@@ -45,6 +45,13 @@ link_base "$PRELIM"
 if "$CANOPUS/target/debug/canopus" verify "$PRELIM" \
     --target "$TARGET_ID" --targets-dir "$CANOPUS/targets" \
     >"$VERIFY_PRELIM" 2>&1; then
+  if [ "${CANOPUS_STATIC_CANDIDATE:-0}" = 1 ]; then
+    # Candidate backends contain no approved firmware callables, so there are
+    # no target-address words to encode. The preliminary relocatable ELF is
+    # already the final artifact for compile-only verification.
+    cp "$PRELIM" "$FINAL"
+    exit 0
+  fi
   echo "error: preliminary codec link unexpectedly had no words to encode" >&2
   exit 1
 fi

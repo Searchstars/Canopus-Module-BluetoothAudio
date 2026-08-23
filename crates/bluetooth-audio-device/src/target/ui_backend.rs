@@ -311,17 +311,6 @@ fn target_row_kind(kind: NodeKind) -> u8 {
     }
 }
 
-/// Band-9 (LVGL v8) trailing-kind for a row kind. Band-9 numbers differ from
-/// band-10: 1 = switch, 12 = forward arrow, 0 = none.
-#[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-fn b9_row_trailing(row_kind: u8) -> u8 {
-    match row_kind {
-        ROW_SWITCH => TRAILING_B9_SWITCH,
-        ROW_ACTION => TRAILING_B9_FORWARD,
-        _ => 0,
-    }
-}
-
 fn snapshot_uses_row(snapshot: &Snapshot, kind: u8, key: u32) -> bool {
     for index in 0..snapshot.node_count as usize {
         let node = &snapshot.nodes[index];
@@ -374,23 +363,13 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
         return -1;
     }
     if backend.content_root.is_null() {
-        #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-        {
-            // Band-9 has no `lvx_content_create`; the firmware page root is
-            // the content parent and its size/placement is fixed by the stock
-            // page shell, so no size/align is applied here.
-            backend.content_root = backend.root;
+        backend.content_root = unsafe { lvx_content_create(backend.root) };
+        if backend.content_root.is_null() {
+            return -1;
         }
-        #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
-        {
-            backend.content_root = unsafe { lvx_content_create(backend.root) };
-            if backend.content_root.is_null() {
-                return -1;
-            }
-            unsafe {
-                lvx_object_set_size(backend.content_root, CONTENT_WIDTH, CONTENT_HEIGHT);
-                lvx_object_align(backend.content_root, ALIGN_TOP_MID, 0, CONTENT_TOP_OFFSET);
-            }
+        unsafe {
+            lvx_object_set_size(backend.content_root, CONTENT_WIDTH, CONTENT_HEIGHT);
+            lvx_object_align(backend.content_root, ALIGN_TOP_MID, 0, CONTENT_TOP_OFFSET);
         }
         if backend.content_root.is_null() {
             return -1;
@@ -536,7 +515,6 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             EMPTY_TEXT.as_ptr()
         };
         let row_kind = target_row_kind(kind);
-        #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
         let trailing = match row_kind {
             ROW_ACTION => TRAILING_FORWARD,
             ROW_SWITCH => TRAILING_SWITCH,
@@ -549,19 +527,8 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
         let mut object = backend.rows[slot];
         let created_now = object.is_null();
         if created_now {
-            #[cfg(not(feature = "target-xiaomi-band-9-pro-3-1-175"))]
             let created = unsafe {
                 lvx_list_row_create(backend.content_root, primary.as_ptr(), secondary, trailing)
-            };
-            #[cfg(feature = "target-xiaomi-band-9-pro-3-1-175")]
-            let created = unsafe {
-                // Band-9 row factory is (parent, primary); the trailing control
-                // is attached afterwards through the kind-specific setter.
-                let row = lvx_list_row_create(backend.content_root, primary.as_ptr());
-                if !row.is_null() {
-                    lvx_list_row_set_trailing(row, b9_row_trailing(row_kind), 0);
-                }
-                row
             };
             if created.is_null() {
                 return -1;
