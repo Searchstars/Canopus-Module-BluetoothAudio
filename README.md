@@ -12,9 +12,7 @@
 |-|-|-|
 |小米手环10 Pro|`3.101.036`|trusted build target|
 |小米手环10 Pro|`3.101.043`|可构建；device gate pending|
-|小米手环9 Pro|`3.1.175`|compile-only static candidate；ABI/LVGL/loader gate pending|
 |小米手环11|`4.100.108`|compile-only static candidate；ABI/LVGL/loader gate pending|
-|小米手环9|`3.1.32`|compile-only static candidate；ABI/LVGL/loader gate pending|
 
 根据测试结果，目前的耳机/音响兼容情况如下：
 
