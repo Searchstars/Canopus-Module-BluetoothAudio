@@ -1,4 +1,4 @@
-use canopus_bluetooth_audio_core::avrcp::{Controller, Event, State};
+use canopus_bluetooth_audio_core::avrcp::{Controller, Event, MediaControl, State};
 
 #[test]
 fn target_reports_volume_capability_and_accepts_peer_volume() {
@@ -41,6 +41,62 @@ fn target_reports_volume_capability_and_accepts_peer_volume() {
     assert_eq!(out[3], 0x09);
     assert_eq!(out[13], 80);
     assert_eq!(target.volume, 80);
+    assert_eq!(target.state, State::Ready);
+}
+
+#[test]
+fn target_accepts_pass_through_press_and_ignores_release() {
+    let mut target = Controller::new();
+    let mut out = [0u8; 32];
+    target.target_connected(64).unwrap();
+
+    for (operation, control) in [
+        (0x44, MediaControl::Play),
+        (0x46, MediaControl::Pause),
+        (0x4b, MediaControl::Next),
+        (0x4c, MediaControl::Previous),
+    ] {
+        let packet = [0x50, 0x11, 0x0e, 0x00, 0x48, 0x7c, operation, 0];
+        assert_eq!(
+            target.receive(&packet, &mut out).unwrap(),
+            Event::PeerControl {
+                control,
+                response_len: packet.len(),
+            }
+        );
+        assert_eq!(
+            &out[..packet.len()],
+            &[0x52, 0x11, 0x0e, 0x09, 0x48, 0x7c, operation, 0]
+        );
+
+        let release = [0x50, 0x11, 0x0e, 0x00, 0x48, 0x7c, operation | 0x80, 0];
+        assert_eq!(
+            target.receive(&release, &mut out).unwrap(),
+            Event::PeerCommand(release.len())
+        );
+        assert_eq!(out[3], 0x09);
+    }
+}
+
+#[test]
+fn target_rejects_unknown_and_malformed_pass_through_without_state_loss() {
+    let mut target = Controller::new();
+    let mut out = [0u8; 32];
+    target.target_connected(64).unwrap();
+
+    let unknown = [0x60, 0x11, 0x0e, 0x00, 0x48, 0x7c, 0x01, 0];
+    assert_eq!(
+        target.receive(&unknown, &mut out).unwrap(),
+        Event::PeerCommand(unknown.len())
+    );
+    assert_eq!(out[3], 0x08);
+    assert_eq!(target.state, State::Ready);
+
+    let truncated = [0x60, 0x11, 0x0e, 0x00, 0x48, 0x7c, 0x44];
+    assert_eq!(
+        target.receive(&truncated, &mut out),
+        Err(canopus_bluetooth_audio_core::avrcp::Error::Packet)
+    );
     assert_eq!(target.state, State::Ready);
 }
 

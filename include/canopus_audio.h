@@ -44,6 +44,18 @@ extern "C" {
 #define CANOPUS_AUDIO_VOLUME_MAX UINT32_C(100)
 #define CANOPUS_AUDIO_VOLUME_DEFAULT UINT32_C(100)
 
+#define CANOPUS_AUDIO_CONTROL_PLAY UINT32_C(1)
+#define CANOPUS_AUDIO_CONTROL_PAUSE UINT32_C(2)
+#define CANOPUS_AUDIO_CONTROL_NEXT UINT32_C(3)
+#define CANOPUS_AUDIO_CONTROL_PREVIOUS UINT32_C(4)
+
+struct canopus_audio_control_event_v1 {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint32_t sequence;
+    uint32_t reserved;
+};
+
 struct canopus_audio_format_v1 {
     uint32_t struct_size;
     uint32_t format;

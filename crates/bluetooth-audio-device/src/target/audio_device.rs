@@ -6,6 +6,8 @@ use core::{
     sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering},
 };
 
+use canopus_bluetooth_audio_core::avrcp::MediaControl;
+
 use canopus_bluetooth_audio_core::audio_input::{
     ABI_VERSION, AudioInput, FormatV1, InputError, StatusV1,
 };
@@ -40,6 +42,85 @@ static AUDIO_REGISTER_RESULT: AtomicI32 = AtomicI32::new(-1);
 static AUDIO_PROBE_RESULT: AtomicI32 = AtomicI32::new(-1);
 static AUDIO_PROBE_ABI: AtomicU32 = AtomicU32::new(0);
 static AUDIO_LAST_COMMAND: AtomicU32 = AtomicU32::new(0);
+
+pub const CONTROL_PLAY: u32 = 1;
+pub const CONTROL_PAUSE: u32 = 2;
+pub const CONTROL_NEXT: u32 = 3;
+pub const CONTROL_PREVIOUS: u32 = 4;
+const CONTROL_CAPACITY: u32 = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct ControlEventV1 {
+    pub struct_size: u32,
+    pub kind: u32,
+    pub sequence: u32,
+    pub reserved: u32,
+}
+
+struct ControlQueue {
+    head: AtomicU32,
+    tail: AtomicU32,
+    dropped: AtomicU32,
+    slots: [AtomicU32; CONTROL_CAPACITY as usize],
+}
+
+impl ControlQueue {
+    const fn new() -> Self {
+        Self {
+            head: AtomicU32::new(0),
+            tail: AtomicU32::new(0),
+            dropped: AtomicU32::new(0),
+            slots: [const { AtomicU32::new(0) }; CONTROL_CAPACITY as usize],
+        }
+    }
+
+    fn push(&self, kind: u32) -> bool {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if head.wrapping_sub(tail) >= CONTROL_CAPACITY {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        self.slots[(head % CONTROL_CAPACITY) as usize].store(kind, Ordering::Relaxed);
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+        true
+    }
+
+    fn pop(&self) -> Option<ControlEventV1> {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        if tail == head {
+            return None;
+        }
+        let kind = self.slots[(tail % CONTROL_CAPACITY) as usize].load(Ordering::Relaxed);
+        let sequence = tail.wrapping_add(1);
+        self.tail.store(sequence, Ordering::Release);
+        Some(ControlEventV1 {
+            struct_size: size_of::<ControlEventV1>() as u32,
+            kind,
+            sequence,
+            reserved: 0,
+        })
+    }
+
+    fn clear(&self) {
+        let head = self.head.load(Ordering::Acquire);
+        self.tail.store(head, Ordering::Release);
+    }
+}
+
+static CONTROL_QUEUE: ControlQueue = ControlQueue::new();
+
+pub fn enqueue_media_control(control: MediaControl) -> bool {
+    let kind = match control {
+        MediaControl::Play => CONTROL_PLAY,
+        MediaControl::Pause => CONTROL_PAUSE,
+        MediaControl::Next => CONTROL_NEXT,
+        MediaControl::Previous => CONTROL_PREVIOUS,
+    };
+    CONTROL_QUEUE.push(kind)
+}
 
 pub fn diagnostics() -> (i32, i32, u32, u32) {
     (
@@ -160,13 +241,6 @@ pub fn register() -> Result<(), i32> {
     }
 }
 
-fn errno(result: Result<(), InputError>) -> i32 {
-    match result {
-        Ok(()) => 0,
-        Err(error) => error.errno(),
-    }
-}
-
 fn schedule_control(result: Result<(), InputError>, schedule: fn() -> Result<(), i32>) -> i32 {
     match result {
         Ok(()) => match schedule() {
@@ -194,10 +268,17 @@ fn set_local_volume(volume: u32) -> i32 {
 }
 
 extern "C" fn audio_open(_file: *mut c_void) -> i32 {
-    errno(input().open())
+    match input().open() {
+        Ok(()) => {
+            CONTROL_QUEUE.clear();
+            0
+        }
+        Err(error) => error.errno(),
+    }
 }
 
 extern "C" fn audio_close(_file: *mut c_void) -> i32 {
+    CONTROL_QUEUE.clear();
     match input().close() {
         Ok(()) => match audio_stream::schedule_close() {
             Ok(()) => 0,
@@ -207,8 +288,16 @@ extern "C" fn audio_close(_file: *mut c_void) -> i32 {
     }
 }
 
-extern "C" fn audio_read(_file: *mut c_void, _buffer: *mut c_void, _count: u32) -> i32 {
-    -38
+extern "C" fn audio_read(_file: *mut c_void, buffer: *mut c_void, count: u32) -> i32 {
+    if buffer.is_null() || count < size_of::<ControlEventV1>() as u32 {
+        return InputError::Invalid.errno();
+    }
+    let Some(event) = CONTROL_QUEUE.pop() else {
+        return -11;
+    };
+    // SAFETY: NuttX supplies a writable caller buffer of at least `count` bytes.
+    unsafe { buffer.cast::<ControlEventV1>().write_unaligned(event) };
+    size_of::<ControlEventV1>() as i32
 }
 
 extern "C" fn audio_write(_file: *mut c_void, buffer: *const c_void, count: u32) -> i32 {
@@ -287,5 +376,36 @@ extern "C" fn audio_ioctl(_file: *mut c_void, command: i32, argument: usize) -> 
             0
         }
         _ => InputError::Invalid.errno(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_queue_preserves_order_and_drops_newest_when_full() {
+        let queue = ControlQueue::new();
+        for kind in 1..=CONTROL_CAPACITY {
+            assert!(queue.push(kind));
+        }
+        assert!(!queue.push(99));
+        assert_eq!(queue.dropped.load(Ordering::Relaxed), 1);
+        for kind in 1..=CONTROL_CAPACITY {
+            let event = queue.pop().unwrap();
+            assert_eq!(event.kind, kind);
+            assert_eq!(event.sequence, kind);
+        }
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn clearing_control_queue_discards_stale_events() {
+        let queue = ControlQueue::new();
+        assert!(queue.push(CONTROL_PLAY));
+        queue.clear();
+        assert!(queue.pop().is_none());
+        assert!(queue.push(CONTROL_NEXT));
+        assert_eq!(queue.pop().unwrap().kind, CONTROL_NEXT);
     }
 }

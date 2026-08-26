@@ -265,8 +265,9 @@ extern "C" fn bond_timer_callback(
     0
 }
 
-/// Exact-target fresh-pair preflight. A retained Classic record is removed and
-/// pairing waits for the authoritative NONE callback; an empty record can move
+/// Exact-target fresh-pair preflight. Removal is always attempted and pairing
+/// waits for the authoritative NONE callback when firmware accepts it; a
+/// rejected removal means there was no Classic bond to clear and pairing moves
 /// directly to stock bond submission.
 fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
     let r = runtime();
@@ -298,33 +299,32 @@ fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
             | FLAG_REMOVE_PENDING
             | FLAG_REMOVE_CONFIRMED,
     );
-    let (_, device) = query_bond(address);
-    if device != BOND_STATE_NONE && device != BOND_STATE_BONDED {
-        r.last_error.store(ERRNO_EBUSY, Ordering::Release);
-        return Err(ERRNO_EBUSY);
-    }
-    // The aggregate Classic bit means that a transport-specific record exists;
-    // firmware leaves that record allocated after unpairing with exact state 0.
-    // Native remove accepts only exact state 2, while create_bond expects state 0
-    // and reuses the existing record.
-    let removable = device == BOND_STATE_BONDED;
-    if !removable {
-        return Ok(false);
-    }
+    // Both bond views are published for the UI, but neither decides anything
+    // here. Firmware owns that judgement: native remove accepts a Classic
+    // record only in exact state 2 and otherwise returns nonzero having
+    // touched no state, so calling it unconditionally is safe and is the
+    // authoritative answer to "was there a bond to clear". Deciding from the
+    // recovered pairing-state accessor instead would put this path back at the
+    // mercy of that one recovered address being right.
+    query_bond(address);
 
     flag_set(FLAG_REMOVE_PENDING, FLAG_REMOVE_CONFIRMED);
     if let Err(error) = arm_bond_timer(BOND_TIMER_REMOVE, REMOVE_TIMEOUT_MS) {
         flag_set(0, FLAG_REMOVE_PENDING);
         return Err(error);
     }
-    let result = unsafe { bt_remove_bond(address.0.as_ptr(), CLASSIC_TRANSPORT) };
-    if result != 0 {
-        cancel_bond_timer();
-        flag_set(0, FLAG_REMOVE_PENDING);
-        r.last_error.store(result, Ordering::Release);
-        return Err(result);
+    if unsafe { bt_remove_bond(address.0.as_ptr(), CLASSIC_TRANSPORT) } == 0 {
+        // Accepted: the authoritative NONE callback completes the transition.
+        return Ok(true);
     }
-    Ok(true)
+
+    // Rejected: there is no removable Classic bond, and no bond-state callback
+    // follows a rejected removal, so the watchdog must be released here rather
+    // than left to time out. Stock bond submission proceeds; a record firmware
+    // will not bond over is reported by create_bond itself.
+    cancel_bond_timer();
+    flag_set(0, FLAG_REMOVE_PENDING);
+    Ok(false)
 }
 
 pub fn adapter_is_on() -> bool {

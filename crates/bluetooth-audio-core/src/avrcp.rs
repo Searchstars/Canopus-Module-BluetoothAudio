@@ -16,6 +16,13 @@ const AVC_CHANGED: u8 = 0x0d;
 const AVC_INTERIM: u8 = 0x0f;
 const AVC_SUBUNIT_PANEL: u8 = 0x48;
 const AVC_OPCODE_VENDOR_DEPENDENT: u8 = 0x00;
+const AVC_OPCODE_PASS_THROUGH: u8 = 0x7c;
+const AVRCP_OPERATION_RELEASED: u8 = 0x80;
+const AVRCP_OPERATION_MASK: u8 = 0x7f;
+const AVRCP_OPERATION_PLAY: u8 = 0x44;
+const AVRCP_OPERATION_PAUSE: u8 = 0x46;
+const AVRCP_OPERATION_FORWARD: u8 = 0x4b;
+const AVRCP_OPERATION_BACKWARD: u8 = 0x4c;
 const BLUETOOTH_SIG_COMPANY_ID: [u8; 3] = [0x00, 0x19, 0x58];
 const PDU_GET_CAPABILITIES: u8 = 0x10;
 const PDU_REGISTER_NOTIFICATION: u8 = 0x31;
@@ -48,12 +55,27 @@ pub enum Error {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MediaControl {
+    Play,
+    Pause,
+    Next,
+    Previous,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Event {
     None,
     Volume(u8),
     Reregister,
     PeerCommand(usize),
-    PeerVolume { volume: u8, response_len: usize },
+    PeerVolume {
+        volume: u8,
+        response_len: usize,
+    },
+    PeerControl {
+        control: MediaControl,
+        response_len: usize,
+    },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -173,7 +195,7 @@ impl Controller {
     }
 
     pub fn receive(&mut self, packet: &[u8], out: &mut [u8]) -> Result<Event, Error> {
-        if packet.len() < 13 || self.state == State::Disconnected {
+        if packet.len() < 6 || self.state == State::Disconnected {
             return Err(Error::Packet);
         }
         let transaction = packet[0] >> 4;
@@ -183,7 +205,22 @@ impl Controller {
         if packet_type != 0
             || ipid != 0
             || u16::from_be_bytes([packet[1], packet[2]]) != AVCTP_PROFILE_AVRCP
+            || packet[4] != AVC_SUBUNIT_PANEL
         {
+            return Err(Error::Packet);
+        }
+        let ctype = packet[3] & 0x0f;
+        if packet[5] == AVC_OPCODE_PASS_THROUGH {
+            if response == AVCTP_COMMAND {
+                return self.receive_pass_through(transaction, ctype, packet, out);
+            }
+            return if response == AVCTP_RESPONSE {
+                Ok(Event::None)
+            } else {
+                Err(Error::Packet)
+            };
+        }
+        if packet.len() < 13 || packet[5] != AVC_OPCODE_VENDOR_DEPENDENT {
             return Err(Error::Packet);
         }
         let pdu = packet[9];
@@ -192,13 +229,8 @@ impl Controller {
             return Err(Error::Packet);
         }
         let parameters = &packet[13..];
-        let ctype = packet[3] & 0x0f;
 
-        if packet[4] != AVC_SUBUNIT_PANEL
-            || packet[5] != AVC_OPCODE_VENDOR_DEPENDENT
-            || packet[6..9] != BLUETOOTH_SIG_COMPANY_ID
-            || packet[10] & 3 != 0
-        {
+        if packet[6..9] != BLUETOOTH_SIG_COMPANY_ID || packet[10] & 3 != 0 {
             return Err(Error::Packet);
         }
         if response == AVCTP_COMMAND {
@@ -261,6 +293,58 @@ impl Controller {
         // long-lived dual-role AVCTP channel. They must not poison current
         // transactions or make A2DP unusable.
         Ok(Event::None)
+    }
+
+    fn receive_pass_through(
+        &self,
+        transaction: u8,
+        ctype: u8,
+        packet: &[u8],
+        out: &mut [u8],
+    ) -> Result<Event, Error> {
+        if ctype != AVC_CONTROL || packet.len() < 8 {
+            return Err(Error::Packet);
+        }
+        let operation_data_length = packet[7] as usize;
+        if packet.len() != 8 + operation_data_length {
+            return Err(Error::Packet);
+        }
+        let released = packet[6] & AVRCP_OPERATION_RELEASED != 0;
+        let control = match packet[6] & AVRCP_OPERATION_MASK {
+            AVRCP_OPERATION_PLAY => Some(MediaControl::Play),
+            AVRCP_OPERATION_PAUSE => Some(MediaControl::Pause),
+            AVRCP_OPERATION_FORWARD => Some(MediaControl::Next),
+            AVRCP_OPERATION_BACKWARD => Some(MediaControl::Previous),
+            _ => None,
+        };
+        let response = if control.is_some() {
+            AVC_ACCEPTED
+        } else {
+            AVC_NOT_IMPLEMENTED
+        };
+        let response_len = Self::pass_through_response(transaction, response, packet, out)?;
+        match (control, released) {
+            (Some(control), false) => Ok(Event::PeerControl {
+                control,
+                response_len,
+            }),
+            _ => Ok(Event::PeerCommand(response_len)),
+        }
+    }
+
+    fn pass_through_response(
+        transaction: u8,
+        ctype: u8,
+        packet: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        if out.len() < packet.len() {
+            return Err(Error::Packet);
+        }
+        out[..packet.len()].copy_from_slice(packet);
+        out[0] = transaction << 4 | AVCTP_RESPONSE << 1;
+        out[3] = ctype;
+        Ok(packet.len())
     }
 
     fn receive_command(
