@@ -1071,6 +1071,13 @@ fn avrcp_l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, block
                         volume_store::mark_target_pending(volume);
                         send_avrcp(&core.avrcp_out[..response_len])
                     }
+                    Ok(AvrcpEvent::PeerControl {
+                        control,
+                        response_len,
+                    }) => {
+                        let _ = audio_device::enqueue_media_control(control);
+                        send_avrcp(&core.avrcp_out[..response_len])
+                    }
                     Ok(AvrcpEvent::PeerCommand(len)) => send_avrcp(&core.avrcp_out[..len]),
                     Ok(AvrcpEvent::None) => 0,
                     Err(avrcp::Error::Rejected) => {

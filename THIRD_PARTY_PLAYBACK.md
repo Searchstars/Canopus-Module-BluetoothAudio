@@ -8,7 +8,7 @@
 userspace
 ┌──────────────────────────────────────────────┐
 │ Music app / third-party app                  │
-│ open("/dev/canopus_audio", O_WRONLY)         │
+│ open("/dev/canopus_audio", O_RDWR)           │
 │ ioctl(CANOPUS_AUDIO_IOC_SET_FORMAT, MP3)     │
 │ write(fd, mp3_bytes, length)                 │
 │ ioctl(START / PAUSE / RESUME / STOP / DRAIN)│
@@ -45,9 +45,9 @@ The first implementation accepts MPEG Layer III and produces the already negotia
 ## 2. Device and ownership
 
 - Path: `/dev/canopus_audio`
-- Access: write-only control/data endpoint.
-- Writers: exactly one open writer at a time. A second open returns `-EBUSY`.
-- Readers: unsupported in ABI v1.
+- Access: read/write control and compressed-audio endpoint.
+- Writers: exactly one open owner at a time. A second open returns `-EBUSY`.
+- Readers: the owning descriptor may nonblockingly read fixed-size `canopus_audio_control_event_v1` headset media-control records.
 - Lifetime: the device exists only while the boot-resident BluetoothAudio module is active.
 - Headset prerequisite: a headset must already be connected and AVDTP must be OPEN or STREAMING before `START` can progress beyond `BUFFERING`.
 - Closing the owning file descriptor performs `STOP`, discards queued input, resets the decoder, and releases writer ownership. It does not unpair or disconnect the headset.
@@ -90,6 +90,23 @@ clients. Values above 100 are rejected to prevent amplification clipping. The
 default for each new exclusive open is 100.
 
 `SET_FORMAT` is legal only in `IDLE`, `CONFIGURED`, or `STOPPED`. Reconfiguration while playing returns `-EBUSY`.
+
+### Headset media controls
+
+Standard AVRCP AV/C PASS THROUGH press commands are acknowledged immediately and exposed to the owning application through `read()`:
+
+```c
+struct canopus_audio_control_event_v1 {
+    uint32_t struct_size;
+    uint32_t kind;       /* CANOPUS_AUDIO_CONTROL_* */
+    uint32_t sequence;   /* wrapping, monotonically increasing */
+    uint32_t reserved;   /* zero */
+};
+```
+
+Supported kinds are `PLAY`, `PAUSE`, `NEXT`, and `PREVIOUS`. Release commands are acknowledged but do not produce a second event. Unknown operation IDs are answered `NOT_IMPLEMENTED` without affecting A2DP or absolute-volume transactions.
+
+The queue contains eight records, preserves accepted press order, and drops the newest event when full. `read()` returns one complete record, `-EAGAIN` when empty, and `-EINVAL` for a null or undersized buffer. Opening and closing the exclusive session discard stale events. Applications should poll from their existing service loop; the Bluetooth callback never blocks waiting for a reader.
 
 ## 4. Format descriptor
 
