@@ -12,7 +12,7 @@
 |-|-|-|
 |小米手环10 Pro|`3.101.036`|trusted build target|
 |小米手环10 Pro|`3.101.043`|可构建；device gate pending|
-|小米手环11|`4.100.108`|compile-only static candidate；ABI/LVGL/loader gate pending|
+|小米手环11|`4.100.139`|prod 构建与安装入口已适配；Rust 蓝牙/音频后端仍为占位实现，暂不支持启用及播放|
 
 根据测试结果，目前的耳机/音响兼容情况如下：
 
@@ -71,11 +71,35 @@ scripts/build-install-watchface.sh
 
 该命令会执行交叉编译、运行 Canopus ELF 验证器、使用本地开发密钥对 CMI1 凭证进行签名、对 Lua 安装器进行smoke test，并将有效载荷暂存至 `watchfaces/bluetooth-audio/`
 
-同时还支持打包多target安装表盘，支持一包多机，上机后将自动选择匹配固件版本的模块安装：
+Prod 按设备分别输出安装表盘，同一设备目录内可包含多个固件版本，上机后自动选择匹配版本：
 
 ```sh
 scripts/build-install-watchface-prod.sh
 ```
+
+默认包含 10 Pro `.036`、`.043` 与 Band 11 `.139`；也可只构建 Band 11：
+
+```sh
+scripts/build-install-watchface-prod.sh xiaomi-band-11
+```
+
+产物分别在 `watchfaces/bluetooth-audio-prod/xiaomi-band-10-pro/`（`.036`、`.043`）与
+`watchfaces/bluetooth-audio-prod/xiaomi-band-11/`（`.139`）。将对应设备目录交给打包器，
+目录根部仅一个 `main.lua` 与 `.bin` 资源；子目录 `build/`、`docs/` 不参与打包。
+也可以传入一个或多个完整 target ID，或设置 `CANOPUS_DEVICE` / `CANOPUS_TARGET`；
+脚本参数优先，其次 `CANOPUS_DEVICE`。选择单个版本会重新生成该设备包，其他设备目录保留。
+
+须先更新 Canopus 框架安装表盘；若旧 Supervisor 已常驻，重启后运行新版框架安装器。
+框架准备 `/data/canopus/inbox` 并注册 `/canopus/install`。外部 Lua 仅用普通 `io.open`
+提交签名安装请求，不包含 execute 恢复或 debug 操作。安装结果保持禁用。
+打包时校验凭证签名、目标和模块哈希，逐步显示写入及回读状态。
+
+Band 11 框架管理器已有用户实机成功反馈，但本模块的 `.139` Rust 后端
+`canopus_identity_guard()` 仍返回 `-38`，蓝牙和音频服务尚未恢复；
+此安装包只能用于安装流程验证，不能作为可用的蓝牙音频模块。
+本轮已核验并修正框架内八个 `.139` Bluelet 候选，新增真实固件 ARM 测试；
+定时器参数、取消所有权和 L2CAP CID 偏移均与 `.043` 不同，不能仅替换地址。
+详见同级框架仓库的 `docs/band11-bluetooth-139.md`。
 
 ## 验证
 
