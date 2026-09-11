@@ -12,9 +12,9 @@
 |-|-|-|
 |小米手环10 Pro|`3.101.036`|trusted build target|
 |小米手环10 Pro|`3.101.043`|可构建；device gate pending|
-|小米手环11|`4.100.139`|prod 构建与安装入口已适配；Rust 蓝牙/音频后端仍为占位实现，暂不支持启用及播放|
+|小米手环11|`4.100.139`|独立 Rust 后端已接入，固件/编译后 ABI 测试通过；可安装启用，耳机连接与播放待实机验证|
 
-根据测试结果，目前的耳机/音响兼容情况如下：
+既有设备测试的耳机/音响兼容情况如下（尚未在 Band 11 `.139` 复测）：
 
 |耳机/音响型号|可用性|备注|
 |-|-|-|
@@ -47,7 +47,7 @@ Rust 私有 ABI 由 `canopus-target-private` facade 的互斥 `target-*` feature
 
 ```sh
 CANOPUS_TARGET=xiaomi-band-10-pro-3.101.036 scripts/build-device.sh
-# 构建 Canopus.toml include 的全部 target（036、043 以及三个 compile-only static candidate）：
+# 构建 Canopus.toml include 的全部 target（036、043、139 以及两个 compile-only static candidate）：
 scripts/build-targets.sh
 ```
 

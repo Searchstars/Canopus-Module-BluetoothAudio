@@ -35,4 +35,4 @@ for TARGET_ID in $TARGET_IDS; do
   luac -p "$WATCHFACE/$DEVICE/main.lua"
 done
 python3 -m unittest discover -s "$CANOPUS/scripts/tests" -p test_module_installer_prod.py
-echo "$WATCHFACE is ready to package (.139 audio runtime remains pending)"
+echo "$WATCHFACE is ready to package (Band 11 device radio/display validation pending)"
