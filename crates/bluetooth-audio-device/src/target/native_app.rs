@@ -95,11 +95,17 @@ fn descriptor_init(index: usize, name: &[u8], page_id: u16) {
         (*descriptor).on_create = page_on_create as *const () as *mut core::ffi::c_void;
         (*descriptor).on_resume = page_on_resume as *const () as *mut core::ffi::c_void;
         (*descriptor).on_pause = page_on_pause as *const () as *mut core::ffi::c_void;
-        #[cfg(not(feature = "target-xiaomi-band-11-4-100-139"))]
+        #[cfg(not(any(
+            feature = "target-xiaomi-band-11-4-100-139",
+            feature = "target-xiaomi-band-11-4-100-155"
+        )))]
         {
             (*descriptor).on_destroy = page_on_destroy as *const () as *mut core::ffi::c_void;
         }
-        #[cfg(feature = "target-xiaomi-band-11-4-100-139")]
+        #[cfg(any(
+            feature = "target-xiaomi-band-11-4-100-139",
+            feature = "target-xiaomi-band-11-4-100-155"
+        ))]
         {
             (*descriptor).on_ui_destroy = page_on_destroy as *const () as *mut core::ffi::c_void;
         }

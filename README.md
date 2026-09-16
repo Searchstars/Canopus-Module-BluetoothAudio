@@ -12,9 +12,9 @@
 |-|-|-|
 |小米手环10 Pro|`3.101.036`|trusted build target|
 |小米手环10 Pro|`3.101.043`|可构建；device gate pending|
-|小米手环11|`4.100.139`|独立 Rust 后端已接入，固件/编译后 ABI 测试通过；可安装启用，耳机连接与播放待实机验证|
+|小米手环11|`4.100.139`、`4.100.155`|各版本独立绑定并签名，统一 prod 表盘自动选择；耳机连接与播放待实机验证|
 
-既有设备测试的耳机/音响兼容情况如下（尚未在 Band 11 `.139` 复测）：
+既有设备测试的耳机/音响兼容情况如下（尚未在 Band 11 `.139` / `.155` 复测）：
 
 |耳机/音响型号|可用性|备注|
 |-|-|-|
@@ -107,3 +107,8 @@ Band 11 框架管理器已有用户实机成功反馈，但本模块的 `.139` R
 scripts/build-device.sh
 scripts/build-install-watchface.sh
 ```
+
+Band 11 的 `scripts/build-install-watchface-prod.sh xiaomi-band-11` 默认同时构建
+`.139` 与 `.155`，产物共用 `watchfaces/bluetooth-audio-prod/xiaomi-band-11/`。
+`main.lua` 按 version + build 选择本版本 ELF 和 CMI1 收据；两版页面销毁回调均使用
+经审核的 `on_ui_destroy` 槽位。

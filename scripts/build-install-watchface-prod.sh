@@ -11,8 +11,8 @@ TARGET_IDS=""
 for ITEM in $SELECTION; do
   case "$ITEM" in
     xiaomi-band-10-pro) EXPANDED="xiaomi-band-10-pro-3.101.036 xiaomi-band-10-pro-3.101.043" ;;
-    xiaomi-band-11) EXPANDED="xiaomi-band-11-4.100.139" ;;
-    xiaomi-band-10-pro-3.101.036|xiaomi-band-10-pro-3.101.043|xiaomi-band-11-4.100.139) EXPANDED="$ITEM" ;;
+    xiaomi-band-11) EXPANDED="xiaomi-band-11-4.100.139 xiaomi-band-11-4.100.155" ;;
+    xiaomi-band-10-pro-3.101.036|xiaomi-band-10-pro-3.101.043|xiaomi-band-11-4.100.139|xiaomi-band-11-4.100.155) EXPANDED="$ITEM" ;;
     *) echo "unsupported prod device/target: $ITEM" >&2; exit 1 ;;
   esac
   for TARGET_ID in $EXPANDED; do

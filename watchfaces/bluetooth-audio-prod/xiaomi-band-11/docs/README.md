@@ -1,6 +1,6 @@
 # Bluetooth Audio production installer
 
-Build targets: xiaomi-band-11-4.100.139
+Build targets: xiaomi-band-11-4.100.139, xiaomi-band-11-4.100.155
 
 Pack only main.lua and the .bin files in this directory. Requires the matching resident Canopus Supervisor.
 Opening the watchface installs the signed module in the disabled state; it does not enable or bootstrap the framework.

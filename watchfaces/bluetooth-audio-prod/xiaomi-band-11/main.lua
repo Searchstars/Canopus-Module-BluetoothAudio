@@ -8,7 +8,11 @@ local CONFIG = {["token"] = "bluetooth_audio",
 ["targets"] = {["4.100.139"] = {["id"] = "xiaomi-band-11-4.100.139",
 ["firmware"] = "31ce82257f7c127950dc5070b86316730cf468a41f0d004559e41e7d923b2c74",
 ["runtime_pending"] = false,
-["build"] = "user-4.100.139-cn-202608280000"}}}
+["build"] = "user-4.100.139-cn-202608280000"},
+["4.100.155"] = {["id"] = "xiaomi-band-11-4.100.155",
+["firmware"] = "ea0bdf1920cb30223d616432af00565ca67622e6468328f5eab155f8cdc2fb9f",
+["runtime_pending"] = false,
+["build"] = "user-4.100.155-cn-202609041500"}}}
 local progress = (function()
 -- One checkpoint per UI timer tick. Never busy-wait or call timer:ready():
 -- the event loop must get a chance to paint before the next operation.
