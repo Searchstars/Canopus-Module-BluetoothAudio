@@ -89,9 +89,12 @@ scripts/build-install-watchface-prod.sh xiaomi-band-11
 也可以传入一个或多个完整 target ID，或设置 `CANOPUS_DEVICE` / `CANOPUS_TARGET`；
 脚本参数优先，其次 `CANOPUS_DEVICE`。选择单个版本会重新生成该设备包，其他设备目录保留。
 
-须先更新 Canopus 框架安装表盘；若旧 Supervisor 已常驻，重启后运行新版框架安装器。
-框架准备 `/data/canopus/inbox` 并注册 `/canopus/install`。外部 Lua 仅用普通 `io.open`
-提交签名安装请求，不包含 execute 恢复或 debug 操作。安装结果保持禁用。
+Band 11 须先更新 Canopus 框架安装表盘；若旧 Supervisor 已常驻，重启后运行新版框架安装器。
+框架准备 `/data/canopus/inbox` 并注册 `/canopus/install`。Band 11 外部 Lua 仅用普通 `io.open`
+提交签名安装请求，不包含 execute 恢复或 debug 操作。
+10 Pro 安装 Lua 沿用改造前的流程（`/dev/canopus`、`getprop` 回退、`mkdir` 准备 inbox），
+不依赖新端点，并按 `ro.build.customer_version` 核对精确构建号（10 Pro 的 `ro.build.id`
+不含日期后缀）。安装结果保持禁用。
 打包时校验凭证签名、目标和模块哈希，逐步显示写入及回读状态。
 
 Band 11 框架管理器已有用户实机成功反馈，但本模块的 `.139` Rust 后端

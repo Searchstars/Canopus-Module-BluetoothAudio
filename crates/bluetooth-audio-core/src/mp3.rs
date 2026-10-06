@@ -5,6 +5,14 @@ pub const MIN_DECODE_INPUT: usize = 2 * 1024;
 pub const REQUIRED_SAMPLE_RATE: u32 = 44_100;
 pub const RESAMPLED_SAMPLE_RATE_24K: u32 = 24_000;
 pub const RESAMPLED_SAMPLE_RATE_48K: u32 = 48_000;
+/// Consumed input is reclaimed only after it reaches half of the window. A
+/// refill then shifts at most half a window, instead of moving the whole
+/// window after every decoded frame.
+const COMPACT_THRESHOLD: usize = REQUIRED_INPUT_WINDOW / 2;
+const ID3V2_HEADER: usize = 10;
+/// Maps a resampler phase remainder in `0..REQUIRED_SAMPLE_RATE` to a Q15
+/// interpolation weight after a 16-bit shift.
+const BLEND_Q15_SCALE: u32 = ((1u64 << 31) / REQUIRED_SAMPLE_RATE as u64) as u32;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StreamProgress {
@@ -39,17 +47,17 @@ pub struct DecodedFrame {
 }
 
 /// Allocation-free nanomp3 wrapper with resident decode output. `nanomp3`
-/// exposes f32 PCM, which is converted to interleaved stereo S16 for SBC.
+/// emits S16 PCM, which is expanded to interleaved stereo 44.1 kHz for SBC.
 pub struct Mp3Decoder {
     decoder: Decoder,
-    pcm: [f32; MAX_SAMPLES_PER_FRAME],
+    pcm: [i16; MAX_SAMPLES_PER_FRAME],
 }
 
 impl Mp3Decoder {
     pub const fn new() -> Self {
         Self {
             decoder: Decoder::new(),
-            pcm: [0.0; MAX_SAMPLES_PER_FRAME],
+            pcm: [0; MAX_SAMPLES_PER_FRAME],
         }
     }
 
@@ -129,25 +137,19 @@ impl Mp3Decoder {
         {
             return Err(Mp3Error::Output);
         }
+        let output = &mut output[..needed];
         if frame.channels == 1 {
             for (sample, pair) in self.pcm[..frame.frames]
                 .iter()
-                .copied()
-                .zip(output[..needed].chunks_exact_mut(2))
+                .zip(output.chunks_exact_mut(2))
             {
-                let sample = apply_volume(float_to_s16(sample), volume_percent);
-                pair[0] = sample;
-                pair[1] = sample;
+                pair[0] = *sample;
+                pair[1] = *sample;
             }
         } else {
-            for (sample, slot) in self.pcm[..needed]
-                .iter()
-                .copied()
-                .zip(output[..needed].iter_mut())
-            {
-                *slot = apply_volume(float_to_s16(sample), volume_percent);
-            }
+            output.copy_from_slice(&self.pcm[..needed]);
         }
+        scale_volume(output, volume_percent);
         Ok(needed)
     }
 
@@ -180,25 +182,22 @@ impl Mp3Decoder {
         if output.len() < needed {
             return Err(Mp3Error::Output);
         }
+        let output = &mut output[..needed];
 
+        let source = &self.pcm[..frame.frames * frame.channels as usize];
         let mut index = (*phase / REQUIRED_SAMPLE_RATE) as usize;
         let mut fraction = *phase % REQUIRED_SAMPLE_RATE;
-        for pair in output[..needed].chunks_exact_mut(2) {
-            let next = (index + 1).min(frame.frames - 1);
-            let blend = fraction as f32 * (1.0 / REQUIRED_SAMPLE_RATE as f32);
-            for (channel, slot) in pair.iter_mut().enumerate() {
-                let source_channel = if frame.channels == 1 { 0 } else { channel };
-                let first = self.pcm[index * frame.channels as usize + source_channel];
-                let second = self.pcm[next * frame.channels as usize + source_channel];
-                let sample = first + (second - first) * blend;
-                *slot = apply_volume(float_to_s16(sample), volume_percent);
-            }
-            fraction += frame.sample_rate;
-            while fraction >= REQUIRED_SAMPLE_RATE {
-                fraction -= REQUIRED_SAMPLE_RATE;
-                index += 1;
+        // SAFETY: output frame `k` starts at `phase + k * sample_rate`, which
+        // is below `span` for every `k < output_frames`, so each source index
+        // is below `frame.frames`; `source` holds that many frames.
+        unsafe {
+            if frame.channels == 1 {
+                resample::<1>(source, frame.sample_rate, &mut index, &mut fraction, output);
+            } else {
+                resample::<2>(source, frame.sample_rate, &mut index, &mut fraction, output);
             }
         }
+        scale_volume(output, volume_percent);
         *phase = index as u32 * REQUIRED_SAMPLE_RATE + fraction - span;
         Ok(needed)
     }
@@ -216,7 +215,11 @@ impl Default for Mp3Decoder {
 pub struct Mp3ByteStream {
     decoder: Mp3Decoder,
     input: [u8; REQUIRED_INPUT_WINDOW],
-    input_len: usize,
+    /// Pending input is `input[input_start..input_end]`.
+    input_start: usize,
+    input_end: usize,
+    /// Bytes of an ID3v2 tag that have not been buffered yet.
+    tag_remaining: usize,
     resample_rate: u32,
     resample_phase: u32,
 }
@@ -226,7 +229,9 @@ impl Mp3ByteStream {
         Self {
             decoder: Mp3Decoder::new(),
             input: [0; REQUIRED_INPUT_WINDOW],
-            input_len: 0,
+            input_start: 0,
+            input_end: 0,
+            tag_remaining: 0,
             resample_rate: 0,
             resample_phase: 0,
         }
@@ -244,8 +249,12 @@ impl Mp3ByteStream {
         unsafe { Mp3Decoder::initialize_at(decoder) };
         let input = unsafe { core::ptr::addr_of_mut!((*destination).input) };
         unsafe { input.write_bytes(0, 1) };
-        let input_len = unsafe { core::ptr::addr_of_mut!((*destination).input_len) };
-        unsafe { input_len.write(0) };
+        let input_start = unsafe { core::ptr::addr_of_mut!((*destination).input_start) };
+        unsafe { input_start.write(0) };
+        let input_end = unsafe { core::ptr::addr_of_mut!((*destination).input_end) };
+        unsafe { input_end.write(0) };
+        let tag_remaining = unsafe { core::ptr::addr_of_mut!((*destination).tag_remaining) };
+        unsafe { tag_remaining.write(0) };
         let resample_rate = unsafe { core::ptr::addr_of_mut!((*destination).resample_rate) };
         unsafe { resample_rate.write(0) };
         let resample_phase = unsafe { core::ptr::addr_of_mut!((*destination).resample_phase) };
@@ -254,25 +263,53 @@ impl Mp3ByteStream {
 
     pub fn reset(&mut self) {
         self.decoder.reset();
-        self.input_len = 0;
+        self.input_start = 0;
+        self.input_end = 0;
+        self.tag_remaining = 0;
         self.resample_rate = 0;
         self.resample_phase = 0;
     }
 
     pub fn pending(&self) -> usize {
-        self.input_len
+        self.input_end - self.input_start
     }
 
+    /// Bytes `push` accepts now. Space before `input_start` is offered only
+    /// once it reaches `COMPACT_THRESHOLD`, so a full window keeps decoding
+    /// from its tail instead of being shifted after every frame.
     pub fn free(&self) -> usize {
-        self.input.len() - self.input_len
+        if self.input_start >= COMPACT_THRESHOLD {
+            self.input.len() - self.pending()
+        } else {
+            self.input.len() - self.input_end
+        }
     }
 
     /// Appends as much compressed input as fits in the resident decode window.
     pub fn push(&mut self, input: &[u8]) -> usize {
         let count = input.len().min(self.free());
-        self.input[self.input_len..self.input_len + count].copy_from_slice(&input[..count]);
-        self.input_len += count;
+        if count > self.input.len() - self.input_end {
+            self.compact();
+        }
+        self.input[self.input_end..self.input_end + count].copy_from_slice(&input[..count]);
+        self.input_end += count;
         count
+    }
+
+    fn compact(&mut self) {
+        if self.input_start != 0 {
+            self.input.copy_within(self.input_start..self.input_end, 0);
+            self.input_end -= self.input_start;
+            self.input_start = 0;
+        }
+    }
+
+    fn consume(&mut self, count: usize) {
+        self.input_start += count;
+        if self.input_start == self.input_end {
+            self.input_start = 0;
+            self.input_end = 0;
+        }
     }
 
     /// Attempts one bounded decode step. A successful frame is converted to
@@ -285,15 +322,36 @@ impl Mp3ByteStream {
         output: &mut [i16],
         end_of_input: bool,
     ) -> Result<StreamProgress, Mp3Error> {
-        if self.input_len < MIN_DECODE_INPUT && !end_of_input {
+        let pending = self.pending();
+        if self.tag_remaining != 0 && pending != 0 {
+            let consumed = pending.min(self.tag_remaining);
+            self.tag_remaining -= consumed;
+            self.consume(consumed);
+            return Ok(StreamProgress::Skipped { consumed });
+        }
+        if pending < MIN_DECODE_INPUT && !end_of_input {
+            // Offer the whole window to the next refill.
+            self.compact();
             return Ok(StreamProgress::NeedInput);
         }
-        let frame = match self.decoder.decode(&self.input[..self.input_len]) {
+        let window = &self.input[self.input_start..self.input_end];
+        if let Some(tag) = id3v2_length(window) {
+            // nanomp3 has no ID3 parser and would otherwise scan embedded
+            // artwork byte by byte for a frame sync.
+            let consumed = tag.min(pending);
+            self.tag_remaining = tag - consumed;
+            self.consume(consumed);
+            return Ok(StreamProgress::Skipped { consumed });
+        }
+        let frame = match self.decoder.decode(window) {
             Ok(frame) => frame,
-            Err(Mp3Error::NeedInput) => return Ok(StreamProgress::NeedInput),
+            Err(Mp3Error::NeedInput) => {
+                self.compact();
+                return Ok(StreamProgress::NeedInput);
+            }
             Err(error) => return Err(error),
         };
-        if frame.consumed == 0 || frame.consumed > self.input_len {
+        if frame.consumed == 0 || frame.consumed > pending {
             return Err(Mp3Error::Output);
         }
         let progress = if frame.frames == 0 {
@@ -319,16 +377,17 @@ impl Mp3ByteStream {
                 channels: frame.channels,
             }
         };
-        self.input.copy_within(frame.consumed..self.input_len, 0);
-        self.input_len -= frame.consumed;
+        self.consume(frame.consumed);
         Ok(progress)
     }
 
     /// Drops an incomplete trailing frame after the producer has requested
     /// DRAIN and supplied all bytes. Ordinary underruns must retain it instead.
     pub fn discard_incomplete(&mut self) -> usize {
-        let discarded = self.input_len;
-        self.input_len = 0;
+        let discarded = self.pending();
+        self.input_start = 0;
+        self.input_end = 0;
+        self.tag_remaining = 0;
         discarded
     }
 }
@@ -343,11 +402,108 @@ fn apply_volume(sample: i16, volume_percent: u32) -> i16 {
     (i32::from(sample) * volume_percent as i32 / 100) as i16
 }
 
-fn float_to_s16(sample: f32) -> i16 {
-    let scaled = sample.clamp(-1.0, 1.0) * 32_767.0;
-    if scaled >= 0.0 {
-        (scaled + 0.5) as i16
-    } else {
-        (scaled - 0.5) as i16
+fn scale_volume(samples: &mut [i16], volume_percent: u32) {
+    if volume_percent != 100 {
+        for sample in samples {
+            *sample = apply_volume(*sample, volume_percent);
+        }
     }
+}
+
+/// Linearly resamples interleaved `CHANNELS`-channel `source` frames to
+/// stereo 44.1 kHz `output`, starting at source frame `index` plus
+/// `fraction / REQUIRED_SAMPLE_RATE`, and advances that position past the
+/// last output frame. Mono input is written to both output channels.
+///
+/// # Safety
+///
+/// `source.len()` must be a nonzero multiple of `CHANNELS`, and every output
+/// frame's start position must lie before the end of `source`: for
+/// `k < output.len() / 2`, `index + (fraction + k * sample_rate) /
+/// REQUIRED_SAMPLE_RATE` must be below `source.len() / CHANNELS`.
+unsafe fn resample<const CHANNELS: usize>(
+    source: &[i16],
+    sample_rate: u32,
+    index: &mut usize,
+    fraction: &mut u32,
+    output: &mut [i16],
+) {
+    let last = source.len() / CHANNELS - 1;
+    let step_whole = (sample_rate / REQUIRED_SAMPLE_RATE) as usize;
+    let step_fraction = sample_rate % REQUIRED_SAMPLE_RATE;
+    let mut position = *index;
+    let mut remainder = *fraction;
+    for pair in output.chunks_exact_mut(2) {
+        debug_assert!(position <= last);
+        let first = position * CHANNELS;
+        let second = if position < last {
+            first + CHANNELS
+        } else {
+            first
+        };
+        let blend = blend_q15(remainder);
+        // SAFETY: the caller guarantees `position <= last`, so both frames lie
+        // inside `source`.
+        unsafe {
+            let left = interpolate(
+                *source.get_unchecked(first),
+                *source.get_unchecked(second),
+                blend,
+            );
+            pair[0] = left;
+            pair[1] = if CHANNELS == 1 {
+                left
+            } else {
+                interpolate(
+                    *source.get_unchecked(first + 1),
+                    *source.get_unchecked(second + 1),
+                    blend,
+                )
+            };
+        }
+        position += step_whole;
+        remainder += step_fraction;
+        if remainder >= REQUIRED_SAMPLE_RATE {
+            remainder -= REQUIRED_SAMPLE_RATE;
+            position += 1;
+        }
+    }
+    *index = position;
+    *fraction = remainder;
+}
+
+#[inline(always)]
+fn blend_q15(fraction: u32) -> i32 {
+    ((fraction * BLEND_Q15_SCALE) >> 16) as i32
+}
+
+/// Rounded Q15 linear interpolation. `(second - first) * blend` stays below
+/// 65_535 * 32_767, so the rounded product fits in i32, and the result lies
+/// between the two samples.
+#[inline(always)]
+fn interpolate(first: i16, second: i16, blend: i32) -> i16 {
+    let first = i32::from(first);
+    let delta = i32::from(second) - first;
+    (first + ((delta * blend + (1 << 14)) >> 15)) as i16
+}
+
+/// Complete length of an ID3v2 tag at the start of `bytes`, if one is there.
+fn id3v2_length(bytes: &[u8]) -> Option<usize> {
+    let header = bytes.get(..ID3V2_HEADER)?;
+    if &header[..3] != b"ID3"
+        || header[3] == 0xff
+        || header[4] == 0xff
+        || header[6..].iter().any(|byte| byte & 0x80 != 0)
+    {
+        return None;
+    }
+    let size = header[6..]
+        .iter()
+        .fold(0usize, |size, byte| size << 7 | usize::from(*byte));
+    let footer = if header[5] & 0x10 != 0 {
+        ID3V2_HEADER
+    } else {
+        0
+    };
+    Some(ID3V2_HEADER + size + footer)
 }

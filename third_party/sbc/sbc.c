@@ -861,6 +861,13 @@ static SBC_ALWAYS_INLINE ssize_t sbc_pack_frame_internal(uint8_t *data,
 	uint32_t levels[2][8];	/* levels are derived from that */
 	uint32_t sb_sample_delta[2][8];
 
+	int i, active;		/* allocated subbands, see below */
+	uint8_t active_ch[16];
+	uint8_t active_sb[16];
+	uint8_t active_bits[16];
+	uint32_t active_level[16];
+	uint32_t active_delta[16];
+
 	/* Can't fill in crc yet */
 
 	crc_header[0] = data[1];
@@ -903,20 +910,34 @@ static SBC_ALWAYS_INLINE ssize_t sbc_pack_frame_internal(uint8_t *data,
 		}
 	}
 
+	/*
+	 * Canopus: list the subbands that received bits once per frame, in the
+	 * same channel/subband order, so the per-block quantizer visits only
+	 * those instead of re-testing and re-indexing every subband.
+	 */
+	active = 0;
+	for (ch = 0; ch < frame_channels; ch++) {
+		for (sb = 0; sb < frame_subbands; sb++) {
+			if (bits[ch][sb] == 0)
+				continue;
+			active_ch[active] = ch;
+			active_sb[active] = sb;
+			active_bits[active] = bits[ch][sb];
+			active_level[active] = levels[ch][sb];
+			active_delta[active] = sb_sample_delta[ch][sb];
+			active++;
+		}
+	}
+
 	for (blk = 0; blk < frame->blocks; blk++) {
-		for (ch = 0; ch < frame_channels; ch++) {
-			for (sb = 0; sb < frame_subbands; sb++) {
+		for (i = 0; i < active; i++) {
+			audio_sample = ((uint64_t) active_level[i] *
+				(active_delta[i] +
+				frame->sb_sample_f[blk][active_ch[i]][active_sb[i]]))
+				>> 32;
 
-				if (bits[ch][sb] == 0)
-					continue;
-
-				audio_sample = ((uint64_t) levels[ch][sb] *
-					(sb_sample_delta[ch][sb] +
-					frame->sb_sample_f[blk][ch][sb])) >> 32;
-
-				PUT_BITS(data_ptr, bits_cache, bits_count,
-					audio_sample, bits[ch][sb]);
-			}
+			PUT_BITS(data_ptr, bits_cache, bits_count,
+				audio_sample, active_bits[i]);
 		}
 	}
 

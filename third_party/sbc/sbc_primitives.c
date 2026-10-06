@@ -217,6 +217,82 @@ static inline void sbc_analyze_1b_8s_simd_even(struct sbc_encoder_state *state,
 	state->sbc_analyze_8s = sbc_analyze_1b_8s_simd_odd;
 }
 
+#if defined(__ARM_FEATURE_DSP) && __ARM_FEATURE_DSP && \
+		!defined(SBC_HIGH_PRECISION) && (SCALE_OUT_BITS == 15)
+#include <arm_acle.h>
+
+/*
+ * Canopus: Cortex-M DSP-extension variant of sbc_analyze_eight_simd().
+ *
+ * The SIMD reference layout accumulates exactly two 16-bit products into
+ * each t1[] lane, which is the operation performed by one SMLAD instruction.
+ * A little-endian word loaded from an int16_t pair holds p[0] in its low half
+ * and p[1] in its high half, so each SMLAD replaces two loads of each operand
+ * and two multiply-accumulates while producing the same wrapped 32-bit sum.
+ */
+static inline int32_t sbc_dsp_pair(const int16_t *pair)
+{
+	int32_t word;
+
+	/* -fno-builtin would otherwise turn this into a library call. */
+	__builtin_memcpy(&word, pair, sizeof(word));
+	return word;
+}
+
+static inline void sbc_analyze_eight_dsp(const int16_t *in, int32_t *out,
+							const FIXED_T *consts)
+{
+	int32_t t1[8];
+	int32_t t2[4];
+	int i, j, hop;
+
+	/* rounding coefficient */
+	for (j = 0; j < 8; j++)
+		t1[j] = (int32_t) 1 << (SBC_PROTO_FIXED8_SCALE - 1);
+
+	/* low pass polyphase filter */
+	for (hop = 0; hop < 80; hop += 16)
+		for (j = 0; j < 8; j++)
+			t1[j] = __smlad(sbc_dsp_pair(in + hop + j * 2),
+					sbc_dsp_pair(consts + hop + j * 2), t1[j]);
+
+	/* scaling, truncated to FIXED_T and packed in pairs */
+	for (j = 0; j < 4; j++)
+		t2[j] = (int32_t) (
+			(uint32_t) (uint16_t)
+				(t1[j * 2] >> SBC_PROTO_FIXED8_SCALE) |
+			((uint32_t) (uint16_t)
+				(t1[j * 2 + 1] >> SBC_PROTO_FIXED8_SCALE) << 16));
+
+	/* do the cos transform */
+	for (j = 0; j < 8; j++)
+		t1[j] = 0;
+	for (i = 0; i < 4; i++)
+		for (j = 0; j < 8; j++)
+			t1[j] = __smlad(t2[i],
+					sbc_dsp_pair(consts + 80 + i * 16 + j * 2),
+					t1[j]);
+
+	for (j = 0; j < 8; j++)
+		out[j] = t1[j] >>
+			(SBC_COS_TABLE_FIXED8_SCALE - SCALE_OUT_BITS);
+}
+
+static void sbc_analyze_4b_8s_dsp(struct sbc_encoder_state *state,
+		int16_t *x, int32_t *out, int out_stride)
+{
+	/* Analyze blocks */
+	sbc_analyze_eight_dsp(x + 24, out, analysis_consts_fixed8_simd_odd);
+	out += out_stride;
+	sbc_analyze_eight_dsp(x + 16, out, analysis_consts_fixed8_simd_even);
+	out += out_stride;
+	sbc_analyze_eight_dsp(x + 8, out, analysis_consts_fixed8_simd_odd);
+	out += out_stride;
+	sbc_analyze_eight_dsp(x + 0, out, analysis_consts_fixed8_simd_even);
+}
+#define SBC_BUILD_WITH_CORTEX_M_DSP 1
+#endif
+
 static inline int16_t unaligned16_be(const uint8_t *ptr)
 {
 	return (int16_t) ((ptr[0] << 8) | ptr[1]);
@@ -624,6 +700,12 @@ void sbc_init_primitives(struct sbc_encoder_state *state)
 	sbc_init_primitives_x86(state);
 
 	/* ARM optimizations */
+#ifdef SBC_BUILD_WITH_CORTEX_M_DSP
+	if (state->increment == 4) {
+		state->sbc_analyze_8s = sbc_analyze_4b_8s_dsp;
+		state->implementation_info = "Cortex-M DSP";
+	}
+#endif
 #ifdef SBC_BUILD_WITH_ARMV6_SUPPORT
 	sbc_init_primitives_armv6(state);
 #endif

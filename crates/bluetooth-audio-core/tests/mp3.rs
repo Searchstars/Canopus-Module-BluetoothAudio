@@ -1,5 +1,5 @@
 use canopus_bluetooth_audio_core::mp3::{
-    Mp3ByteStream, Mp3Decoder, REQUIRED_SAMPLE_RATE, StreamProgress,
+    Mp3ByteStream, Mp3Decoder, REQUIRED_INPUT_WINDOW, REQUIRED_SAMPLE_RATE, StreamProgress,
 };
 
 const MP3: &[u8] = include_bytes!("fixtures/tone-44100-stereo.mp3");
@@ -258,4 +258,85 @@ fn resamples_packaged_24khz_mp3_for_44100hz_sbc() {
 #[test]
 fn resamples_48khz_mp3_for_44100hz_sbc() {
     assert_resampled_stream(MP3_48K, 48_000);
+}
+
+fn packaged_mp3() -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../watchfaces/bluetooth-audio/long_test_audio.bin");
+    std::fs::read(path).unwrap()
+}
+
+/// Decodes `mp3` through `Mp3ByteStream`, offering at most `chunk` bytes per
+/// push, and returns the S16 output plus the number of skipped bytes.
+fn decode_stream(mp3: &[u8], chunk: usize) -> (Vec<i16>, usize) {
+    let mut stream = Mp3ByteStream::new();
+    let mut cursor = 0usize;
+    let mut output = Vec::new();
+    let mut skipped = 0usize;
+    let mut pcm = [0i16; 2304];
+    loop {
+        // Refill the way the device pump does: until the stream stops
+        // offering space or the producer has nothing left.
+        while stream.free() != 0 && cursor < mp3.len() {
+            let count = chunk.min(stream.free()).min(mp3.len() - cursor);
+            assert_eq!(stream.push(&mp3[cursor..cursor + count]), count);
+            cursor += count;
+        }
+        let end_of_input = cursor == mp3.len();
+        match stream.decode_next(100, &mut pcm, end_of_input).unwrap() {
+            StreamProgress::NeedInput if end_of_input => break,
+            StreamProgress::NeedInput => assert!(stream.free() != 0),
+            StreamProgress::Skipped { consumed } => {
+                assert!(consumed > 0);
+                skipped += consumed;
+            }
+            StreamProgress::Frame { samples, .. } => {
+                output.extend_from_slice(&pcm[..samples]);
+            }
+        }
+    }
+    stream.discard_incomplete();
+    (output, skipped)
+}
+
+#[test]
+fn window_refills_do_not_change_decoded_pcm() {
+    let mp3 = packaged_mp3();
+    let (pump_sized, pump_skipped) = decode_stream(&mp3, 512);
+    let (odd_sized, odd_skipped) = decode_stream(&mp3, 97);
+    assert!(pump_sized.len() > 44_100 * 2 * 60);
+    assert_eq!(pump_skipped, odd_skipped);
+    assert!(pump_sized == odd_sized);
+}
+
+#[test]
+fn skips_id3v2_tag_without_scanning_its_payload() {
+    let mp3 = packaged_mp3();
+    assert_eq!(&mp3[..3], b"ID3");
+    let tag = 10
+        + mp3[6..10]
+            .iter()
+            .fold(0usize, |size, byte| size << 7 | usize::from(*byte));
+    assert!(tag > REQUIRED_INPUT_WINDOW);
+
+    // The packaged file starts with a large ID3v2 tag carrying cover art.
+    let audio = &mp3[tag..tag + 64 * 1024];
+    let (tagged, skipped) = decode_stream(&mp3[..tag + audio.len()], 512);
+    assert!(!tagged.is_empty());
+    let (_, untagged_skipped) = decode_stream(audio, 512);
+    assert_eq!(skipped, tag + untagged_skipped);
+
+    // A tag whose payload looks like MP3 frames is still skipped as a whole.
+    let mut spoofed = Vec::new();
+    spoofed.extend_from_slice(b"ID3\x04\x00\x10");
+    let payload = 3 * MP3.len();
+    spoofed.extend((0..4).map(|shift| ((payload >> (21 - 7 * shift)) & 0x7f) as u8));
+    for _ in 0..3 {
+        spoofed.extend_from_slice(MP3);
+    }
+    spoofed.extend_from_slice(b"3DI\x04\x00\x00\x00\x00\x00\x00");
+    spoofed.extend_from_slice(audio);
+    let (spoofed_pcm, spoofed_skipped) = decode_stream(&spoofed, 509);
+    assert_eq!(spoofed_skipped, 10 + payload + 10 + untagged_skipped);
+    assert!(spoofed_pcm == tagged);
 }

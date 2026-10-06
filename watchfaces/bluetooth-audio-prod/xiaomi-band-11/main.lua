@@ -75,7 +75,6 @@ return M
 
 end)()
 local lvgl = require("lvgl")
-local ENDPOINT = "/canopus/install"
 local function read_all(path)
     local f = io.open(path, "rb")
     if not f then return nil end
@@ -84,6 +83,19 @@ local function read_all(path)
     if not ok or not closed or not result then return nil end
     return data
 end
+local function u16(data, off) return string.unpack("<I2", data, off + 1) end
+local function u32(data, off) return string.unpack("<I4", data, off + 1) end
+-- Device family: ENDPOINT, REPLY_SIZE, SUPERVISOR_MISSING, BUILD_PROPERTY,
+-- fallback_identity(), prepare_inbox(checkpoint), failure_detail(response, exchange).
+-- Band 11 Lua denies /dev and has no shell. The Supervisor's separate
+-- /canopus/install node accepts INSTALL only and appends a u32 diagnostic;
+-- the framework installer prepares /data/canopus/inbox.
+local ENDPOINT, REPLY_SIZE = "/canopus/install", 40
+local SUPERVISOR_MISSING = "请更新并运行 Canopus 框架安装表盘"
+local BUILD_PROPERTY = "ro.build.id"
+local function fallback_identity() return nil end
+local function prepare_inbox() end
+local function failure_detail(response) return " error " .. u32(response, 36) end
 local properties = {}
 local identity = read_all("/etc/build.prop")
 local identity_invalid = false
@@ -97,9 +109,11 @@ if identity then
     end
 end
 local version = not identity_invalid and properties["ro.build.version"]
+local build = properties[BUILD_PROPERTY]
+if not identity then version, build = fallback_identity() end
 local target = version and CONFIG.targets[version]
 local startup_error
-if not target or (target.build and properties["ro.build.id"] ~= target.build) then
+if not target or (target.build and build ~= target.build) then
     startup_error = "不支持的固件：" .. tostring(version or "Unknown")
 end
 
@@ -134,8 +148,6 @@ if startup_error then fail(startup_error); return end
 local runner, current
 local function checkpoint(text) runner.checkpoint(text) end
 local function check(ok, message) if not ok then error(message, 0) end end
-local function u16(data, off) return string.unpack("<I2", data, off + 1) end
-local function u32(data, off) return string.unpack("<I4", data, off + 1) end
 local function fixed(data, off, size) return data:sub(off + 1, off + size):match("^[^%z]*") end
 local function hex(data) return (data:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
 local function write_file(path, data)
@@ -149,7 +161,7 @@ end
 local function device_exchange(request, size)
     -- Request and result must remain synchronous: Supervisor shares a mailbox.
     local f = io.open(ENDPOINT, "wb")
-    check(f, "请更新并运行 Canopus 框架安装表盘")
+    check(f, SUPERVISOR_MISSING)
     local ok, result, message = pcall(f.write, f, request)
     local closed, close_result = pcall(f.close, f)
     check(ok and result and (type(result) ~= "number" or result == #request)
@@ -165,7 +177,7 @@ end
 local function install()
     checkpoint("检查 Canopus 运行环境")
     local f = io.open(ENDPOINT, "rb")
-    check(f, "请更新并运行 Canopus 框架安装表盘")
+    check(f, SUPERVISOR_MISSING)
     f:close()
     checkpoint("读取目标模块与签名")
     local stem = SCRIPT_PATH .. CONFIG.stem .. "-" .. target.id
@@ -192,7 +204,7 @@ local function install()
             and #data == 12 + u16(data, 6) * u16(data, 8), "Invalid icon: " .. name)
         assets[#assets + 1] = {name, data}
     end
-    -- The framework installer prepares inbox; external modules need no shell.
+    prepare_inbox(checkpoint)
     local payloads = {
         {"inbox/" .. CONFIG.token .. ".cmi", receipt},
         {"inbox/" .. CONFIG.token .. ".ko", module},
@@ -209,15 +221,15 @@ local function install()
     local payload = CONFIG.token .. "\0"
     local request = string.pack("<I4I2I2I2I2I4I4I4I4I4I4",
         0x43504332, 36, 1, 1, 0, 36 + #payload, 2, 1, 0, 0, #payload) .. payload
-    local response = device_exchange(request, 40)
+    local response = device_exchange(request, REPLY_SIZE)
     check(u32(response, 0) == 0x43504332 and u16(response, 4) == 36
         and u16(response, 6) == 2 and u16(response, 8) == 1
-        and u32(response, 12) == 40 and u32(response, 16) == 2
+        and u32(response, 12) == REPLY_SIZE and u32(response, 16) == 2
         and u32(response, 20) == 1 and u32(response, 24) == 0
-        and u32(response, 32) == 4, "Invalid supervisor response")
+        and u32(response, 32) == REPLY_SIZE - 36, "Invalid supervisor response")
     if u32(response, 28) ~= 5 then
         local detail = "Supervisor result " .. u32(response, 28)
-            .. " error " .. u32(response, 36)
+            .. failure_detail(response, device_exchange)
         error(detail, 0)
     end
     return target.runtime_pending and

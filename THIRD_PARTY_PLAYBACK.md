@@ -20,10 +20,10 @@ userspace
               single-writer input ring
                        │
                   nanomp3 decoder
-                       │ f32 decode output
+                       │ saturating S16 decode output
                        ▼
-              saturating S16 PCM conversion
-                       │ 44.1 kHz mono/stereo
+              Q15 linear resampling / mono expansion
+                       │ 44.1 kHz stereo
                        ▼
               fixed-profile SBC encoder
                        │ negotiated bitpool
@@ -197,11 +197,11 @@ The file-operation callbacks only validate, copy into the ring, change atomics, 
 
 A Bluetooth-owner pump performs bounded work:
 
-1. linearize enough ring bytes for `nanomp3::Decoder::decode`;
-2. retain incomplete trailing MP3 data for the next write;
+1. linearize enough ring bytes for `nanomp3::Decoder::decode`, reclaiming consumed window space only after half of the 16-KiB window has been decoded;
+2. retain incomplete trailing MP3 data for the next write, and skip ID3v2 tags without scanning them for frame syncs;
 3. validate sample rate and channel count;
-4. validate a decoded 24-kHz, 44.1-kHz, or 48-kHz stream and convert f32 samples to interleaved S16;
-5. resample 24-kHz or 48-kHz PCM to 44.1 kHz with bounded phase-carrying linear interpolation;
+4. validate a decoded 24-kHz, 44.1-kHz, or 48-kHz stream, which nanomp3 emits as interleaved S16;
+5. resample 24-kHz or 48-kHz PCM to 44.1 kHz with bounded phase-carrying Q15 linear interpolation;
 6. duplicate mono to stereo;
 7. feed exactly 128 PCM samples per channel into the SBC encoder;
 8. aggregate negotiated SBC frames into RTP packets up to the media MTU;

@@ -70,13 +70,14 @@ impl Decoder {
         unsafe { core::ptr::addr_of_mut!(self.state).write_bytes(0, 1) };
     }
 
-    /// Decode MP3 data into a buffer, returning the amount of MP3 data consumed and info about decoded samples.
+    /// Decode MP3 data into a buffer of interleaved S16 samples, returning the
+    /// amount of MP3 data consumed and info about decoded samples.
     /// `mp3` should contain at least several frames worth of data at any given time (16KiB recommended) to avoid artifacting.
     ///
     /// # Panics
     ///
     /// Panics if `pcm` is less than [`MAX_SAMPLES_PER_FRAME`] long.
-    pub fn decode(&mut self, mp3: &[u8], pcm: &mut [f32]) -> (usize, Option<FrameInfo>) {
+    pub fn decode(&mut self, mp3: &[u8], pcm: &mut [i16]) -> (usize, Option<FrameInfo>) {
         assert!(pcm.len() >= MAX_SAMPLES_PER_FRAME, "pcm buffer too small");
 
         let mut info = minimp3::mp3dec_frame_info_t::default();
