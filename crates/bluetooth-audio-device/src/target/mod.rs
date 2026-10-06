@@ -30,7 +30,7 @@
 //! non-blocking `try_with_core`; UI actions enter through the blocking
 //! `with_core`. Callbacks never touch LVX.
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use canopus_target_private::*;
 
@@ -166,6 +166,15 @@ fn sync_target_model(core: &mut Core) {
         changed = true;
     }
     let details = &mut core.controller.model.details;
+    let caps_lo = r.sbc_caps_lo.load(Ordering::Acquire).to_le_bytes();
+    let caps_hi = r.sbc_caps_hi.load(Ordering::Acquire).to_le_bytes();
+    let new_caps = [
+        caps_lo[0], caps_lo[1], caps_lo[2], caps_lo[3], caps_hi[0], caps_hi[1],
+    ];
+    if details.sbc_caps != new_caps {
+        details.sbc_caps = new_caps;
+        changed = true;
+    }
     let signaling_cid = r.signaling_cid.load(Ordering::Acquire) as u16;
     let signaling_mtu = r.signaling_mtu.load(Ordering::Acquire) as u16;
     let media_cid = r.media_cid.load(Ordering::Acquire) as u16;
@@ -347,7 +356,27 @@ pub fn rebuild(page_index: usize) -> i32 {
 /// Rebuilds an active page only when callbacks have committed a newer model.
 /// The LVGL timer invoking this function belongs to the page owner thread, so
 /// applying the snapshot never crosses UI-thread ownership.
+/// Throttle for detail-page rebuilds while the media stream is pumping.
+const STREAM_REBUILD_THROTTLE_MS: u32 = 1000;
+static LAST_STREAM_REBUILD: AtomicU32 = AtomicU32::new(0);
+
 pub fn rebuild_if_changed(page_index: usize, rendered_generation: u32) -> i32 {
+    // During live playback every RTP packet touches the model, so this timer
+    // would rebuild and hold the core lock at 4 Hz, preempting the media
+    // timer that encodes and sends each packet — the listener hears stutter.
+    // Diagnostics rows do not need 4 Hz: throttle rebuilds to 1 per second
+    // while the stream is pumping. Explicit refreshes bypass this.
+    let streaming = runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING;
+    if streaming {
+        let Some(now) = audio_stream::monotonic_ms() else {
+            return 0;
+        };
+        let last = LAST_STREAM_REBUILD.load(Ordering::Acquire);
+        if last != 0 && (now.wrapping_sub(last) as i32) < STREAM_REBUILD_THROTTLE_MS as i32 {
+            return 0;
+        }
+        LAST_STREAM_REBUILD.store(now, Ordering::Release);
+    }
     let snapshot = match try_with_core(|core| {
         sync_target_model(core);
         let model = &core.controller.model;
@@ -379,11 +408,18 @@ pub fn rebuild_if_changed(page_index: usize, rendered_generation: u32) -> i32 {
 pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u32) {
     let valid = with_core(|core| {
         let model = &core.controller.model;
-        // Refresh must remain usable when asynchronous callbacks have advanced
-        // the model beyond the generation rendered into this row. Other actions
-        // keep strict generation checks so stale device-index bindings cannot
-        // target a different discovery result.
-        if (key, event_id) == (31, ui::EVENT_REFRESH) {
+        // Scan, refresh, and navigation are generation-independent global
+        // actions: they never dereference a rendered row's stale bindings.
+        // Dropping them when asynchronous callbacks (adapter power-on,
+        // registration, pairing transitions) advanced the model between the
+        // render and the tap left the scan button dead on first entry.
+        if matches!(
+            (key, event_id),
+            (21, ui::EVENT_SCAN)
+                | (31, ui::EVENT_REFRESH)
+                | (11, ui::EVENT_CONNECTED_DETAIL)
+                | (1, ui::EVENT_BACK)
+        ) {
             return true;
         }
         if generation != model.generation {

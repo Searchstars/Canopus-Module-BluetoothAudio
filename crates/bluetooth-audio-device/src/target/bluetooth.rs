@@ -20,6 +20,10 @@ const ERR_CORE_DESCRIPTOR_MISMATCH: i32 = -1115;
 const ERR_CORE_PAIR_SLOT_MISMATCH: i32 = -1116;
 const ERR_CORE_REGISTRATION: i32 = -1117;
 const BOND_TIMER_EVENT: u8 = 11;
+const SCAN_START_RETRY_EVENT: u8 = 14;
+const SCAN_START_RETRY_TAG: &[u8] = b"A2DPT\0";
+const SCAN_START_RETRY_DELAY_MS: u32 = 500;
+const SCAN_START_MAX_ATTEMPTS: u32 = 10;
 const BOND_TIMER_REMOVE: u8 = 1;
 const BOND_TIMER_PAIR: u8 = 2;
 const REMOVE_TIMEOUT_MS: u32 = 8_000;
@@ -73,22 +77,29 @@ impl Platform for DevicePlatform {
     type Error = i32;
 
     fn start_discovery(&mut self, timeout_seconds: u8) -> Result<(), i32> {
-        compatibility::install()?;
-        transport::schedule_initialize_if_ready()?;
+        // First-entry race: the adapter is still powering on or the transport
+        // is still initializing. Keep the scan in Starting and retry from the
+        // owner timer instead of failing the button press.
         let r = runtime();
-        r.scan_epoch.fetch_add(1, Ordering::AcqRel);
-        let adapter = adapter();
-        let result = unsafe { bt_discovery_start(adapter, timeout_seconds as i32) };
-        if result == 0 {
-            flag_set(FLAG_DISCOVERY_ACTIVE, 0);
-            Ok(())
-        } else {
-            runtime().last_error.store(result, Ordering::Release);
-            Err(result)
+        if !flag(FLAG_ADAPTER_ON) || r.transport_state.load(Ordering::Acquire) != TRANSPORT_READY {
+            r.scan_start_timeout
+                .store(u32::from(timeout_seconds), Ordering::Release);
+            r.scan_start_attempts.store(0, Ordering::Release);
+            arm_scan_start_retry()?;
+            return Ok(());
         }
+        start_discovery_immediate(timeout_seconds)
     }
 
     fn stop_discovery(&mut self) -> Result<(), i32> {
+        let r = runtime();
+        if r.scan_start_timeout.swap(0, Ordering::AcqRel) != 0 {
+            r.scan_start_attempts.store(0, Ordering::Release);
+            // Discovery never started: report stopped so the UI returns to
+            // idle instead of waiting for a firmware callback.
+            dispatch_core_event(CORE_EVENT_DISCOVERY_STOPPED, [0; 6]);
+            return Ok(());
+        }
         runtime().scan_stop_pending.store(1, Ordering::Release);
         let adapter = adapter();
         let result = unsafe { bt_discovery_stop(adapter) };
@@ -271,6 +282,17 @@ extern "C" fn bond_timer_callback(
 /// directly to stock bond submission.
 fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
     let r = runtime();
+    // A failed or stranded attempt parks the transport with no other recovery
+    // path. Reclaim it when no live channel remains; live channels first need
+    // the queued teardown to complete, so the retry comes a moment later.
+    if matches!(
+        r.transport_state.load(Ordering::Acquire),
+        TRANSPORT_FAILED | TRANSPORT_WAIT_BOND
+    ) && transport::recover_parked().is_err()
+    {
+        r.last_error.store(ERRNO_EBUSY, Ordering::Release);
+        return Err(ERRNO_EBUSY);
+    }
     if r.transport_state.load(Ordering::Acquire) != TRANSPORT_READY
         || r.media_state.load(Ordering::Acquire) != MEDIA_IDLE
         || !flag(FLAG_ADAPTER_REGISTERED)
@@ -470,6 +492,105 @@ fn submit_bond() -> Result<(), i32> {
 }
 
 /// Clears a pending pairing transaction for a matching address.
+fn start_discovery_immediate(timeout_seconds: u8) -> Result<(), i32> {
+    compatibility::install()?;
+    transport::schedule_initialize_if_ready()?;
+    let r = runtime();
+    r.scan_epoch.fetch_add(1, Ordering::AcqRel);
+    let adapter = adapter();
+    let result = unsafe { bt_discovery_start(adapter, timeout_seconds as i32) };
+    if result == 0 {
+        flag_set(FLAG_DISCOVERY_ACTIVE, 0);
+        Ok(())
+    } else {
+        runtime().last_error.store(result, Ordering::Release);
+        Err(result)
+    }
+}
+
+fn arm_scan_start_retry() -> Result<(), i32> {
+    let r = runtime();
+    let owner = unsafe { bt_l2cap_owner() };
+    if owner.is_null() {
+        return Err(ERR_STATE);
+    }
+    let token = unsafe { bt_alloc(4) } as *mut u32;
+    if token.is_null() {
+        return Err(ERR_ALLOC);
+    }
+    unsafe { token.write(r.generation) };
+    if unsafe {
+        bt_timer_add(
+            owner,
+            SCAN_START_RETRY_DELAY_MS,
+            SCAN_START_RETRY_EVENT,
+            scan_start_retry_work as *const () as *mut core::ffi::c_void,
+            token.cast(),
+            SCAN_START_RETRY_TAG.as_ptr(),
+            1,
+        )
+    } == 0
+    {
+        unsafe { bt_free(token.cast()) };
+        return Err(ERR_STATE);
+    }
+    Ok(())
+}
+
+extern "C" fn scan_start_retry_work(
+    _owner_valid: i32,
+    _event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    let r = runtime();
+    if !argument.is_null() {
+        let generation = unsafe { argument.cast::<u32>().read() };
+        unsafe { bt_free(argument) };
+        if generation != r.generation {
+            return 0;
+        }
+    }
+    let timeout = r.scan_start_timeout.load(Ordering::Acquire);
+    if timeout == 0 {
+        return 0;
+    }
+    if flag(FLAG_ADAPTER_ON) && r.transport_state.load(Ordering::Acquire) == TRANSPORT_DORMANT {
+        // Cold start: the module has not initialized its transport yet.
+        let _ = transport::schedule_initialize_if_ready();
+    }
+    if flag(FLAG_ADAPTER_ON)
+        && r.transport_state.load(Ordering::Acquire) == TRANSPORT_READY
+        && r.sdp_registered.load(Ordering::Acquire) != 0
+    {
+        r.scan_start_timeout.store(0, Ordering::Release);
+        r.scan_start_attempts.store(0, Ordering::Release);
+        match start_discovery_immediate(timeout as u8) {
+            Ok(()) => {}
+            Err(error) => {
+                r.last_error.store(error, Ordering::Release);
+                let _ = try_with_core(|core| {
+                    core.controller.model.scan = canopus_bluetooth_audio_core::ScanState::Failed;
+                    core.controller.model.touch();
+                });
+            }
+        }
+        return 0;
+    }
+    let attempt = r.scan_start_attempts.fetch_add(1, Ordering::AcqRel) + 1;
+    if attempt >= SCAN_START_MAX_ATTEMPTS {
+        r.scan_start_timeout.store(0, Ordering::Release);
+        r.scan_start_attempts.store(0, Ordering::Release);
+        r.last_error.store(ERR_STATE, Ordering::Release);
+        let _ = try_with_core(|core| {
+            core.controller.model.scan = canopus_bluetooth_audio_core::ScanState::Failed;
+            core.controller.model.touch();
+        });
+        return 0;
+    }
+    let _ = arm_scan_start_retry();
+    0
+}
+
 pub fn cancel_connect_pairing(address: [u8; 6]) {
     if !target_matches(address) || flag(FLAG_BONDED) {
         return;

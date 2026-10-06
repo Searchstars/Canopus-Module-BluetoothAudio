@@ -133,6 +133,9 @@ pub struct Runtime {
     pub registration_state: AtomicU32,
     pub flags: AtomicU32,
     pub scan_stop_pending: AtomicU32,
+    /// Deferred discovery start: seconds-budget when pending, zero otherwise.
+    pub scan_start_timeout: AtomicU32,
+    pub scan_start_attempts: AtomicU32,
     pub discovery_state: AtomicI32,
     pub adapter_state: AtomicI32,
     pub bond_transport: AtomicI32,
@@ -154,6 +157,13 @@ pub struct Runtime {
     pub transport_state: AtomicU32,
     pub signaling_cid: AtomicU32,
     pub signaling_mtu: AtomicU32,
+    /// Media-codec capability bytes of the last SEP probed before an
+    /// `Unsupported` negotiation failure, split across two words.
+    pub sbc_caps_lo: AtomicU32,
+    pub sbc_caps_hi: AtomicU32,
+    /// Remaining-budget counter for the bounded AVDTP signaling connect
+    /// retries; zero means no retry is pending.
+    pub signaling_connect_attempts: AtomicU32,
     pub avrcp_state: AtomicU32,
     pub avrcp_cid: AtomicU32,
     pub avrcp_mtu: AtomicU32,
@@ -209,6 +219,8 @@ impl Runtime {
             registration_state: AtomicU32::new(REGISTRATION_NONE),
             flags: AtomicU32::new(0),
             scan_stop_pending: AtomicU32::new(0),
+            scan_start_timeout: AtomicU32::new(0),
+            scan_start_attempts: AtomicU32::new(0),
             discovery_state: AtomicI32::new(0),
             adapter_state: AtomicI32::new(-1),
             bond_transport: AtomicI32::new(1),
@@ -229,6 +241,9 @@ impl Runtime {
             transport_state: AtomicU32::new(TRANSPORT_DORMANT),
             signaling_cid: AtomicU32::new(0),
             signaling_mtu: AtomicU32::new(0),
+            sbc_caps_lo: AtomicU32::new(0),
+            sbc_caps_hi: AtomicU32::new(0),
+            signaling_connect_attempts: AtomicU32::new(0),
             avrcp_state: AtomicU32::new(AVRCP_IDLE),
             avrcp_cid: AtomicU32::new(0),
             avrcp_mtu: AtomicU32::new(0),
