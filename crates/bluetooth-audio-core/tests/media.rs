@@ -69,7 +69,7 @@ fn derives_bounded_startup_prebuffer_from_sink_delay() {
 
 #[test]
 fn packetizes_variable_length_stream_packets() {
-    let mut p = StreamPacketizer::new(2_820, 39).unwrap();
+    let mut p = StreamPacketizer::new(2_820, 39, false).unwrap();
     assert_eq!(p.frames_per_packet, 5);
     let mut packet = [0u8; MAX_PACKET];
     let payload = p.write_header(&mut packet, 5, true).unwrap();

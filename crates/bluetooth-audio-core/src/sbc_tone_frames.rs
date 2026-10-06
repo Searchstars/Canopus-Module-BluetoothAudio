@@ -6,6 +6,9 @@
 
 pub const MIN_BITPOOL: u8 = 27;
 pub const MAX_BITPOOL: u8 = 53;
+/// Selection cap for live negotiation: the codec's 53-byte maximum starved
+/// playback on Xiaomi Buds 6; 39 is the device-proven REDMI operating point.
+pub const PREFERRED_MAX_BITPOOL: u8 = 39;
 const XOR_MASK: u8 = 0x02;
 
 const ENCODED_FRAMES: [u8; 2484] = [
@@ -172,6 +175,20 @@ pub const fn frame_length(bitpool: u8) -> Option<usize> {
         return None;
     }
     Some(12 + 2 * bitpool as usize)
+}
+
+/// Live-stream frame length for the negotiated channel mode: 12 + 2*bitpool
+/// for stereo, one byte more per frame when the sink only accepts joint
+/// stereo (16 blocks, 8 subbands, Loudness in both cases).
+pub const fn stream_frame_length(bitpool: u8, joint: bool) -> Option<usize> {
+    if bitpool < MIN_BITPOOL || bitpool > MAX_BITPOOL {
+        return None;
+    }
+    Some(if joint {
+        13 + 2 * bitpool as usize
+    } else {
+        12 + 2 * bitpool as usize
+    })
 }
 
 pub fn write_frame(bitpool: u8, out: &mut [u8]) -> Option<usize> {

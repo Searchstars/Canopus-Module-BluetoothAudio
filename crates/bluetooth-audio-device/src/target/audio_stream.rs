@@ -127,7 +127,7 @@ pub fn diagnostic_timing() -> (u32, u32, u32, u32, u32, u32) {
     )
 }
 
-fn monotonic_ms() -> Option<u32> {
+pub fn monotonic_ms() -> Option<u32> {
     let mut value = stock_timespec_t {
         tv_sec: 0,
         tv_nsec: 0,
@@ -216,6 +216,7 @@ impl Pipeline {
         generation: u32,
         mtu: u16,
         bitpool: u8,
+        joint: bool,
         reported_delay_100us: u16,
         fresh: bool,
     ) -> Result<(), i32> {
@@ -229,10 +230,10 @@ impl Pipeline {
             unsafe { self.encoder.assume_init_drop() };
             self.encoder_ready = false;
         }
-        let encoder = SbcEncoder::new(bitpool)?;
+        let encoder = SbcEncoder::new(bitpool, joint)?;
         self.encoder.write(encoder);
         self.encoder_ready = true;
-        let packetizer = StreamPacketizer::new(mtu, bitpool).map_err(|_| ERR_AUDIO_CODEC)?;
+        let packetizer = StreamPacketizer::new(mtu, bitpool, joint).map_err(|_| ERR_AUDIO_CODEC)?;
         let startup_packets = packetizer.startup_packets(reported_delay_100us);
         self.packetizer.write(packetizer);
         self.packetizer_ready = true;
@@ -773,6 +774,7 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
         generation,
         mtu,
         sbc.maximum_bitpool,
+        sbc.joint(),
         core.source.reported_delay_100us,
         fresh,
     ) {

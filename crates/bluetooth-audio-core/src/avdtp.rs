@@ -57,6 +57,14 @@ pub struct SbcConfig {
     pub minimum_bitpool: u8,
     pub maximum_bitpool: u8,
 }
+
+impl SbcConfig {
+    /// True when the negotiated channel mode is joint stereo; the live
+    /// encoder and RTP frame length follow this.
+    pub const fn joint(&self) -> bool {
+        self.frequency_channel & 0x01 != 0
+    }
+}
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     State,
@@ -79,6 +87,14 @@ pub struct Source {
     pub reported_delay_100us: u16,
     pub local_in_use: bool,
     pub media_connected: bool,
+    /// Discovered audio sink SEIDs; some peers (Xiaomi Buds 6) do not expose
+    /// their SBC SEP first, so negotiation walks this list before failing.
+    sinks: [u8; 8],
+    sink_count: u8,
+    sink_pos: u8,
+    /// Media-codec capability bytes of the most recently probed SEP, for the
+    /// diagnostics page when negotiation ends in `Unsupported`.
+    pub last_codec_caps: [u8; 6],
     next_transaction: u8,
     pending_transaction: u8,
     pending_signal: u8,
@@ -110,6 +126,10 @@ impl Source {
             reported_delay_100us: 0,
             local_in_use: false,
             media_connected: false,
+            sinks: [0; 8],
+            sink_count: 0,
+            sink_pos: 0,
+            last_codec_caps: [0; 6],
             next_transaction: 0,
             pending_transaction: 0,
             pending_signal: 0,
@@ -282,6 +302,10 @@ impl Source {
         if signal == SIGNAL_GET_ALL_CAPABILITIES {
             return self.command(SIGNAL_GET_CAPABILITIES, &[self.remote_seid << 2], out);
         }
+        if signal == SIGNAL_GET_CAPABILITIES && self.state == State::ReadingCapabilities {
+            // This SEP refuses capability queries: walk to the next sink SEP.
+            return self.next_sink_capabilities(out);
+        }
         match signal {
             SIGNAL_OPEN => self.state = State::Configuring,
             SIGNAL_START => self.state = State::Open,
@@ -325,23 +349,36 @@ impl Source {
                 if payload.is_empty() || payload.len() & 1 != 0 {
                     return Err(Error::Packet);
                 }
-                let seid = payload
-                    .chunks_exact(2)
-                    .find_map(|item| {
-                        let candidate = item[0] >> 2;
-                        let in_use = (item[0] >> 1) & 1;
-                        let media_type = item[1] >> 4;
-                        let sink = (item[1] >> 3) & 1;
-                        (candidate > 0
-                            && candidate <= 0x3e
-                            && item[0] & 1 == 0
-                            && item[1] & 7 == 0
-                            && in_use == 0
-                            && media_type == 0
-                            && sink == 1)
-                            .then_some(candidate)
-                    })
-                    .ok_or(Error::Unsupported)?;
+                self.sinks = [0; 8];
+                self.sink_count = 0;
+                self.sink_pos = 0;
+                for item in payload.chunks_exact(2) {
+                    let candidate = item[0] >> 2;
+                    let in_use = (item[0] >> 1) & 1;
+                    let media_type = item[1] >> 4;
+                    let sink = (item[1] >> 3) & 1;
+                    if candidate > 0
+                        && candidate <= 0x3e
+                        && item[0] & 1 == 0
+                        && item[1] & 7 == 0
+                        && in_use == 0
+                        && media_type == 0
+                        && sink == 1
+                        && (self.sink_count as usize) < self.sinks.len()
+                    {
+                        self.sinks[self.sink_count as usize] = candidate;
+                        self.sink_count += 1;
+                    }
+                }
+                if self.sink_count == 0 {
+                    // No SEP passed the sink filters: surface the raw
+                    // response head on the diagnostics page.
+                    for (slot, byte) in self.last_codec_caps.iter_mut().zip(payload) {
+                        *slot = *byte;
+                    }
+                    return Err(Error::Unsupported);
+                }
+                let seid = self.sinks[0];
                 self.remote_seid = seid;
                 self.state = State::ReadingCapabilities;
                 self.command(SIGNAL_GET_ALL_CAPABILITIES, &[seid << 2], out)
@@ -380,6 +417,23 @@ impl Source {
         }
     }
 
+    /// Advances to the next discovered sink SEP (if any) and queries its
+    /// capabilities; `Error::Unsupported` once the list is exhausted.
+    fn next_sink_capabilities(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        self.sink_pos += 1;
+        if (self.sink_pos as usize) >= self.sink_count as usize
+            || (self.sink_pos as usize) >= self.sinks.len()
+        {
+            return Err(Error::Unsupported);
+        }
+        let seid = self.sinks[self.sink_pos as usize];
+        self.remote_seid = seid;
+        self.delay_reporting = false;
+        self.reported_delay_100us = 0;
+        self.state = State::ReadingCapabilities;
+        self.command(SIGNAL_GET_ALL_CAPABILITIES, &[seid << 2], out)
+    }
+
     fn choose_sbc(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         let mut offset = 0;
         let mut found = None;
@@ -395,19 +449,39 @@ impl Source {
             if category == CATEGORY_DELAY_REPORTING && length == 0 {
                 delay = true;
             }
+            if category == CATEGORY_MEDIA_CODEC {
+                for (slot, byte) in self.last_codec_caps.iter_mut().zip(value) {
+                    *slot = *byte;
+                }
+            }
             if category == CATEGORY_MEDIA_CODEC
                 && length == 6
                 && value[0] >> 4 == 0
+                && value[0] & 0x0f == 0
                 && value[1] == 0
             {
-                let frequency_channel = value[2] & 0x22;
+                // Prefer plain stereo; fall back to joint stereo for sinks
+                // that only implement it. Both are encoded at 44.1 kHz,
+                // 16 blocks, 8 subbands, Loudness.
+                let frequency_channel = if value[2] & 0x22 == 0x22 {
+                    0x22
+                } else if value[2] & 0x21 == 0x21 {
+                    0x21
+                } else {
+                    0
+                };
                 let shape = value[3] & 0x15;
+                // The live encode path (MP3 decode + resample + SBC) shares
+                // one Cortex-M33 with the Bluetooth stack: selecting the
+                // peer's maximum bitpool starved playback on Xiaomi Buds 6.
+                // Cap the selection at the device-proven REDMI value.
+                let maximum_bitpool = value[5]
+                    .min(crate::sbc_tone_frames::MAX_BITPOOL)
+                    .min(crate::sbc_tone_frames::PREFERRED_MAX_BITPOOL);
                 let minimum_bitpool = value[4].max(crate::sbc_tone_frames::MIN_BITPOOL);
-                let maximum_bitpool = value[5].min(crate::sbc_tone_frames::MAX_BITPOOL);
-                if frequency_channel == 0x22 && shape == 0x15 && minimum_bitpool <= maximum_bitpool
-                {
+                if frequency_channel != 0 && shape == 0x15 && minimum_bitpool <= maximum_bitpool {
                     found = Some(SbcConfig {
-                        frequency_channel: 0x22,
+                        frequency_channel,
                         blocks_subbands_allocation: 0x15,
                         minimum_bitpool,
                         maximum_bitpool,
@@ -419,7 +493,13 @@ impl Source {
         if offset != payload.len() {
             return Err(Error::Packet);
         }
-        let config = found.ok_or(Error::Unsupported)?;
+        // The first sink SEP of some peers (Xiaomi Buds 6) carries no usable
+        // SBC configuration: walk the remaining discovered sink SEPs before
+        // giving up.
+        let config = match found {
+            Some(config) => config,
+            None => return self.next_sink_capabilities(out),
+        };
         self.selected_sbc = config;
         self.delay_reporting = delay;
         let mut bytes = [0u8; 14];
@@ -432,8 +512,8 @@ impl Source {
             6,
             0,
             0,
-            0x22,
-            0x15,
+            config.frequency_channel,
+            config.blocks_subbands_allocation,
             config.minimum_bitpool,
             config.maximum_bitpool,
         ]);

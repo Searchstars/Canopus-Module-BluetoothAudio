@@ -6,7 +6,12 @@ use canopus_target_private::{bt_alloc, bt_free};
 
 unsafe extern "C" {
     fn canopus_sbc_encoder_size() -> u32;
-    fn canopus_sbc_encoder_init(memory: *mut c_void, size: u32, bitpool: u8) -> *mut c_void;
+    fn canopus_sbc_encoder_init(
+        memory: *mut c_void,
+        size: u32,
+        bitpool: u8,
+        joint: u32,
+    ) -> *mut c_void;
     fn canopus_sbc_encoder_encode(
         context: *mut c_void,
         pcm: *const i16,
@@ -23,7 +28,7 @@ pub struct SbcEncoder {
 }
 
 impl SbcEncoder {
-    pub fn new(bitpool: u8) -> Result<Self, i32> {
+    pub fn new(bitpool: u8, joint: bool) -> Result<Self, i32> {
         let size = unsafe { canopus_sbc_encoder_size() };
         if size == 0 {
             return Err(-5);
@@ -32,7 +37,7 @@ impl SbcEncoder {
         if allocation.is_null() {
             return Err(-12);
         }
-        let context = unsafe { canopus_sbc_encoder_init(allocation, size, bitpool) };
+        let context = unsafe { canopus_sbc_encoder_init(allocation, size, bitpool, joint as u32) };
         if context.is_null() {
             unsafe { bt_free(allocation) };
             return Err(-22);
