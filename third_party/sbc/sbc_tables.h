@@ -357,13 +357,13 @@ static const FIXED_T cos_table_fixed_8[128] = {
  * and "odd" cases are needed
  */
 
-static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_even[40 + 16] = {
+static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_even_masked[40 + 16] = {
 #define C0 1.0932568993
 #define C1 1.3056875580
 #define C2 1.3056875580
 #define C3 1.6772280856
 
-#define F(x) F_PROTO4(x)
+#define F(x) ((FIXED_T)(F_PROTO4(x) ^ (int16_t)0xA5A5))
 	 F(0.00000000E+00 * C0),  F(3.83720193E-03 * C0),
 	 F(5.36548976E-04 * C1),  F(2.73370904E-03 * C1),
 	 F(3.06012286E-03 * C2),  F(3.89205149E-03 * C2),
@@ -385,7 +385,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_even[40 + 16] = {
 	-F(5.36548976E-04 * C2),  F(2.73370904E-03 * C2),
 	 F(0.00000000E+00 * C3), -F(1.86581691E-03 * C3),
 #undef F
-#define F(x) F_COS4(x)
+#define F(x) ((FIXED_T)(F_COS4(x) ^ (int16_t)0xA5A5))
 	 F(0.7071067812 / C0),  F(0.9238795325 / C1),
 	-F(0.7071067812 / C0),  F(0.3826834324 / C1),
 	-F(0.7071067812 / C0), -F(0.3826834324 / C1),
@@ -402,13 +402,13 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_even[40 + 16] = {
 #undef C3
 };
 
-static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_odd[40 + 16] = {
+static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_odd_masked[40 + 16] = {
 #define C0 1.3056875580
 #define C1 1.6772280856
 #define C2 1.0932568993
 #define C3 1.3056875580
 
-#define F(x) F_PROTO4(x)
+#define F(x) ((FIXED_T)(F_PROTO4(x) ^ (int16_t)0xA5A5))
 	 F(2.73370904E-03 * C0),  F(5.36548976E-04 * C0),
 	-F(1.49188357E-03 * C1),  F(0.00000000E+00 * C1),
 	 F(3.83720193E-03 * C2),  F(1.09137620E-02 * C2),
@@ -430,7 +430,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_odd[40 + 16] = {
 	 F(3.83720193E-03 * C2),  F(0.00000000E+00 * C2),
 	 F(2.73370904E-03 * C3), -F(5.36548976E-04 * C3),
 #undef F
-#define F(x) F_COS4(x)
+#define F(x) ((FIXED_T)(F_COS4(x) ^ (int16_t)0xA5A5))
 	 F(0.9238795325 / C0), -F(1.0000000000 / C1),
 	 F(0.3826834324 / C0), -F(1.0000000000 / C1),
 	-F(0.3826834324 / C0), -F(1.0000000000 / C1),
@@ -447,7 +447,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_odd[40 + 16] = {
 #undef C3
 };
 
-static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_even[80 + 64] = {
+static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_even_masked[80 + 64] = {
 #define C0 2.7906148894
 #define C1 2.4270044280
 #define C2 2.8015616024
@@ -457,7 +457,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_even[80 + 64] = {
 #define C6 2.8015616024
 #define C7 3.1710363741
 
-#define F(x) F_PROTO8(x)
+#define F(x) ((FIXED_T)(F_PROTO8(x) ^ (int16_t)0xA5A5))
 	 F(0.00000000E+00 * C0),  F(2.01182542E-03 * C0),
 	 F(1.56575398E-04 * C1),  F(1.78371725E-03 * C1),
 	 F(3.43256425E-04 * C2),  F(1.47640169E-03 * C2),
@@ -499,7 +499,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_even[80 + 64] = {
 	 F(1.47640169E-03 * C6), -F(3.43256425E-04 * C6),
 	 F(1.13992507E-03 * C7), -F(5.54620202E-04 * C7),
 #undef F
-#define F(x) F_COS8(x)
+#define F(x) ((FIXED_T)(F_COS8(x) ^ (int16_t)0xA5A5))
 	 F(0.7071067812 / C0),  F(0.8314696123 / C1),
 	-F(0.7071067812 / C0), -F(0.1950903220 / C1),
 	-F(0.7071067812 / C0), -F(0.9807852804 / C1),
@@ -544,7 +544,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_even[80 + 64] = {
 #undef C7
 };
 
-static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_odd[80 + 64] = {
+static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_odd_masked[80 + 64] = {
 #define C0 2.5377944043
 #define C1 2.4270044280
 #define C2 2.8015616024
@@ -554,7 +554,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_odd[80 + 64] = {
 #define C6 2.8015616024
 #define C7 3.1710363741
 
-#define F(x) F_PROTO8(x)
+#define F(x) ((FIXED_T)(F_PROTO8(x) ^ (int16_t)0xA5A5))
 	 F(0.00000000E+00 * C0), -F(8.23919506E-04 * C0),
 	 F(1.56575398E-04 * C1),  F(1.78371725E-03 * C1),
 	 F(3.43256425E-04 * C2),  F(1.47640169E-03 * C2),
@@ -596,7 +596,7 @@ static const FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_odd[80 + 64] = {
 	 F(1.47640169E-03 * C6), -F(3.43256425E-04 * C6),
 	 F(1.13992507E-03 * C7), -F(5.54620202E-04 * C7),
 #undef F
-#define F(x) F_COS8(x)
+#define F(x) ((FIXED_T)(F_COS8(x) ^ (int16_t)0xA5A5))
 	-F(1.0000000000 / C0),  F(0.8314696123 / C1),
 	-F(1.0000000000 / C0), -F(0.1950903220 / C1),
 	-F(1.0000000000 / C0), -F(0.9807852804 / C1),

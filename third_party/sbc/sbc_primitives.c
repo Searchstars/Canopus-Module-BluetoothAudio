@@ -21,6 +21,29 @@ void *memcpy(void *restrict dst, const void *restrict src, size_t count);
 #include "sbc_math.h"
 #include "sbc_tables.h"
 
+static FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_even[40 + 16];
+static FIXED_T SBC_ALIGNED analysis_consts_fixed4_simd_odd[40 + 16];
+static FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_even[80 + 64];
+static FIXED_T SBC_ALIGNED analysis_consts_fixed8_simd_odd[80 + 64];
+static int sbc_tables_unmasked = 0;
+
+static void unmask_sbc_tables(void)
+{
+	size_t i;
+	if (sbc_tables_unmasked)
+		return;
+	for (i = 0; i < 40 + 16; i++) {
+		analysis_consts_fixed4_simd_even[i] = (FIXED_T)(analysis_consts_fixed4_simd_even_masked[i] ^ (int16_t)0xA5A5);
+		analysis_consts_fixed4_simd_odd[i] = (FIXED_T)(analysis_consts_fixed4_simd_odd_masked[i] ^ (int16_t)0xA5A5);
+	}
+	for (i = 0; i < 80 + 64; i++) {
+		analysis_consts_fixed8_simd_even[i] = (FIXED_T)(analysis_consts_fixed8_simd_even_masked[i] ^ (int16_t)0xA5A5);
+		analysis_consts_fixed8_simd_odd[i] = (FIXED_T)(analysis_consts_fixed8_simd_odd_masked[i] ^ (int16_t)0xA5A5);
+	}
+	sbc_tables_unmasked = 1;
+}
+
+
 #include "sbc_primitives.h"
 #include "sbc_primitives_sse.h"
 #include "sbc_primitives_mmx.h"
@@ -678,6 +701,7 @@ static void sbc_init_primitives_x86(struct sbc_encoder_state *state)
  */
 void sbc_init_primitives(struct sbc_encoder_state *state)
 {
+	unmask_sbc_tables();
 	/* Default implementation for analyze functions */
 	state->sbc_analyze_4s = sbc_analyze_4b_4s_simd;
 	if (state->increment == 1)

@@ -1,39 +1,23 @@
 schema = 1
 
 [module]
-id = "org.canopus.bluetooth-audio"
+id = "bluetooth_audio"
 version = "0.1.0"
+version_code = 1
+kind = "target"
 language = "rust"
 lifecycle = "resident-after-activation"
 canopus_abi = "1"
+description = "Canopus Bluetooth headphone manager module"
+
+[build]
+sources = ["crates/bluetooth-audio-device/Cargo.toml"]
 
 [targets]
 include = [
   "xiaomi-band-10-pro-3.101.036",
   "xiaomi-band-10-pro-3.101.043",
-  "xiaomi-band-9-pro-3.1.175",
   "xiaomi-band-11-4.100.139",
   "xiaomi-band-11-4.100.155",
-  "xiaomi-band-9-3.1.32",
+  "xiaomi-band-11-4.100.177",
 ]
-
-[capabilities]
-# These are the product requirements. The current public target pack exposes
-# only identity-guard; remaining target-private calls require device validation.
-required = [
-  "identity-guard",
-  "classic.adapter",
-  "classic.l2cap",
-  "classic.sdp",
-  "bt.timer",
-  "native-app.register",
-  "launcher.entry",
-  "ui.dispatch",
-]
-
-[native_app]
-enabled = true
-app_id = "org.canopus.bluetooth-audio"
-name = "耳机"
-entry = "canopus_module_descriptor"
-role = "standalone"
