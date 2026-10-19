@@ -21,3 +21,6 @@ include = [
   "xiaomi-band-11-4.100.155",
   "xiaomi-band-11-4.100.177",
 ]
+
+[resources]
+files = ["watchfaces/appicon_headphones.png"]

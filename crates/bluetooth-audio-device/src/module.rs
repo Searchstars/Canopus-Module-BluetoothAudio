@@ -64,7 +64,20 @@ pub extern "C" fn canopus_mod_activate(_ctx: *const ContextV1) -> i32 {
     // bootstrap operation. Once Bluetooth callbacks are published, unload is
     // irreversible until reboot.
     #[cfg(feature = "device")]
-    let rc = crate::target::activate();
+    let rc = {
+        if !crate::target::runtime::initialized() {
+            let mut generation = LOAD_GENERATION
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1);
+            if generation == 0 {
+                generation = LOAD_GENERATION
+                    .fetch_add(1, Ordering::AcqRel)
+                    .wrapping_add(1);
+            }
+            crate::target::prepare(generation);
+        }
+        crate::target::activate()
+    };
     #[cfg(not(feature = "device"))]
     let rc = 0;
     #[cfg(feature = "device")]
