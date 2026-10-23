@@ -29,9 +29,9 @@ target-xiaomi-band-11-4-100-155 = [
     "device",
     "canopus-target-private/target-xiaomi-band-11-4-100-155",
 ]
-target-xiaomi-band-11-4-100-177 = [
+target-xiaomi-band-11-4-100-179 = [
     "device",
-    "canopus-target-private/target-xiaomi-band-11-4-100-177",
+    "canopus-target-private/target-xiaomi-band-11-4-100-179",
 ]
 
 [dependencies]
