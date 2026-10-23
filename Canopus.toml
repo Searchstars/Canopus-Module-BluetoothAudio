@@ -7,7 +7,7 @@ version_code = 1
 kind = "target"
 language = "rust"
 lifecycle = "resident-after-activation"
-canopus_abi = "1"
+canopus_abi = "2"
 description = "Canopus Bluetooth headphone manager module"
 
 [build]

@@ -50,6 +50,9 @@ dependencies = [
 [[package]]
 name = "canopus-ui-core"
 version = "0.1.0"
+dependencies = [
+ "canopus-abi",
+]
 
 [[package]]
 name = "cc"
