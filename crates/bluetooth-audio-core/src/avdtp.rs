@@ -14,13 +14,13 @@ const SIGNAL_START: u8 = 0x07;
 const SIGNAL_CLOSE: u8 = 0x08;
 const SIGNAL_SUSPEND: u8 = 0x09;
 const SIGNAL_ABORT: u8 = 0x0a;
-const SIGNAL_SECURITY_CONTROL: u8 = 0x0b;
 const SIGNAL_GET_ALL_CAPABILITIES: u8 = 0x0c;
 const SIGNAL_DELAY_REPORT: u8 = 0x0d;
 const CATEGORY_MEDIA_TRANSPORT: u8 = 0x01;
 const CATEGORY_MEDIA_CODEC: u8 = 0x07;
 const CATEGORY_DELAY_REPORTING: u8 = 0x08;
 const ERROR_BAD_ACP_SEID: u8 = 0x12;
+const ERROR_SEP_IN_USE: u8 = 0x13;
 const ERROR_BAD_PAYLOAD_FORMAT: u8 = 0x18;
 const ERROR_BAD_STATE: u8 = 0x31;
 const MAX_SDU: usize = 128;
@@ -95,6 +95,9 @@ pub struct Source {
     /// Media-codec capability bytes of the most recently probed SEP, for the
     /// diagnostics page when negotiation ends in `Unsupported`.
     pub last_codec_caps: [u8; 6],
+    /// Signal and AVDTP error code of the last command the sink refused; zero
+    /// until a refusal arrives.
+    pub last_reject: (u8, u8),
     next_transaction: u8,
     pending_transaction: u8,
     pending_signal: u8,
@@ -130,6 +133,7 @@ impl Source {
             sink_count: 0,
             sink_pos: 0,
             last_codec_caps: [0; 6],
+            last_reject: (0, 0),
             next_transaction: 0,
             pending_transaction: 0,
             pending_signal: 0,
@@ -296,9 +300,15 @@ impl Source {
         out: &mut [u8],
     ) -> Result<usize, Error> {
         if signal != self.pending_signal || transaction != self.pending_transaction {
-            return Err(Error::Packet);
+            // A late or duplicate answer to a command that is no longer pending.
+            return Ok(0);
         }
         self.pending_signal = 0;
+        // The error code is the last byte in every reject layout (alone, after
+        // the ACP SEID, or after the failing service category); a general
+        // reject carries none.
+        let code = payload.last().copied().unwrap_or(0);
+        self.last_reject = (signal, code);
         if signal == SIGNAL_GET_ALL_CAPABILITIES {
             return self.command(SIGNAL_GET_CAPABILITIES, &[self.remote_seid << 2], out);
         }
@@ -308,8 +318,16 @@ impl Source {
         }
         match signal {
             SIGNAL_OPEN => self.state = State::Configuring,
-            SIGNAL_START => self.state = State::Open,
-            SIGNAL_SUSPEND => self.state = State::Streaming,
+            // A refused START or SUSPEND leaves the stream where it was; the
+            // link stays usable and the caller sees the state fall back.
+            SIGNAL_START => {
+                self.state = State::Open;
+                return Ok(0);
+            }
+            SIGNAL_SUSPEND => {
+                self.state = State::Streaming;
+                return Ok(0);
+            }
             SIGNAL_DISCOVER | SIGNAL_GET_CAPABILITIES | SIGNAL_SET_CONFIGURATION => {
                 self.state = State::Idle;
                 self.remote_seid = 0;
@@ -320,7 +338,7 @@ impl Source {
             }
             _ => {}
         }
-        Err(Error::Rejected(payload.first().copied().unwrap_or(0)))
+        Err(Error::Rejected(code))
     }
 
     fn reset_fragment(&mut self) {
@@ -341,7 +359,8 @@ impl Source {
         out: &mut [u8],
     ) -> Result<usize, Error> {
         if signal != self.pending_signal || transaction != self.pending_transaction {
-            return Err(Error::Packet);
+            // A late or duplicate answer to a command that is no longer pending.
+            return Ok(0);
         }
         self.pending_signal = 0;
         match signal {
@@ -639,7 +658,13 @@ impl Source {
             }
             SIGNAL_START if self.valid_local_seid(payload) => {
                 if self.state != State::Open || !self.media_connected {
-                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out);
+                    return response(
+                        transaction,
+                        signal,
+                        MSG_REJECT,
+                        &[local, ERROR_BAD_STATE],
+                        out,
+                    );
                 }
                 let len = response(transaction, signal, MSG_ACCEPT, &[], out)?;
                 self.state = State::Streaming;
@@ -647,21 +672,39 @@ impl Source {
             }
             SIGNAL_SUSPEND if self.valid_local_seid(payload) => {
                 if self.state != State::Streaming {
-                    return response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out);
+                    return response(
+                        transaction,
+                        signal,
+                        MSG_REJECT,
+                        &[local, ERROR_BAD_STATE],
+                        out,
+                    );
                 }
                 let len = response(transaction, signal, MSG_ACCEPT, &[], out)?;
                 self.state = State::Open;
                 Ok(len)
             }
             SIGNAL_START | SIGNAL_SUSPEND => {
-                response(transaction, signal, MSG_REJECT, &[ERROR_BAD_ACP_SEID], out)
+                let seid = payload.first().copied().unwrap_or(0) & 0xfc;
+                response(
+                    transaction,
+                    signal,
+                    MSG_REJECT,
+                    &[seid, ERROR_BAD_ACP_SEID],
+                    out,
+                )
+            }
+            // This source always configures the sink itself. A sink that
+            // tries to configure our SEP first (some do, racing our own
+            // SET_CONFIGURATION) gets a well-formed refusal and waits for
+            // ours instead of seeing an unsupported-signal reject.
+            SIGNAL_SET_CONFIGURATION => {
+                response(transaction, signal, MSG_REJECT, &[0, ERROR_SEP_IN_USE], out)
             }
             SIGNAL_RECONFIGURE => {
-                response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out)
+                response(transaction, signal, MSG_REJECT, &[0, ERROR_BAD_STATE], out)
             }
-            SIGNAL_SECURITY_CONTROL | SIGNAL_SET_CONFIGURATION | SIGNAL_OPEN => {
-                response(transaction, signal, MSG_GENERAL_REJECT, &[], out)
-            }
+            SIGNAL_OPEN => response(transaction, signal, MSG_REJECT, &[ERROR_BAD_STATE], out),
             _ => response(transaction, signal, MSG_GENERAL_REJECT, &[], out),
         }
     }

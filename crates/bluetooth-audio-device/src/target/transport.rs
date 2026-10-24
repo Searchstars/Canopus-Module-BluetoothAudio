@@ -725,10 +725,47 @@ fn reserve_media_flow_credit() -> bool {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => return true,
+            Ok(_) => {
+                if current == 0 {
+                    // The stall clock runs from the first credit taken.
+                    mark_media_flow_progress();
+                }
+                return true;
+            }
             Err(observed) => current = observed,
         }
     }
+}
+
+fn mark_media_flow_progress() {
+    if let Some(now) = audio_stream::monotonic_ms() {
+        runtime()
+            .media_flow_progress_ms
+            .store(now, Ordering::Release);
+    }
+}
+
+/// How long the media flow has gone without progress; `None` without a clock.
+pub(super) fn media_flow_idle_ms() -> Option<u32> {
+    let now = audio_stream::monotonic_ms()?;
+    Some(now.wrapping_sub(runtime().media_flow_progress_ms.load(Ordering::Acquire)))
+}
+
+/// Most consecutive write-offs before the pump relies on flow events alone:
+/// each write-off lets this many more SDUs into a stock queue that may be full.
+const MAX_MEDIA_FLOW_RECLAIM_STREAK: u32 = 3;
+
+/// Writes off every outstanding credit after the stack stopped returning them,
+/// so a lost flow event cannot silence the stream for good. Bounded per streak.
+pub(super) fn reclaim_media_flow_credits() -> bool {
+    let r = runtime();
+    if r.media_flow_reclaim_streak.load(Ordering::Acquire) >= MAX_MEDIA_FLOW_RECLAIM_STREAK {
+        return false;
+    }
+    r.media_flow_reclaim_streak.fetch_add(1, Ordering::AcqRel);
+    r.media_flow_reclaims.fetch_add(1, Ordering::Relaxed);
+    r.media_tx_outstanding.store(0, Ordering::Release);
+    true
 }
 
 fn return_media_flow_credit() {
@@ -764,6 +801,8 @@ fn release_media_flow_credit() {
             Err(current) => outstanding = current,
         }
     }
+    r.media_flow_reclaim_streak.store(0, Ordering::Release);
+    mark_media_flow_progress();
 }
 
 pub(super) fn reset_audio_media_flow() {
@@ -772,6 +811,8 @@ pub(super) fn reset_audio_media_flow() {
     r.media_packets_queued.store(0, Ordering::Release);
     r.media_packets_completed.store(0, Ordering::Release);
     r.media_startup_silence_queued.store(0, Ordering::Release);
+    r.media_flow_reclaims.store(0, Ordering::Release);
+    r.media_flow_reclaim_streak.store(0, Ordering::Release);
 }
 
 pub(super) fn send_audio_media(sdu: &[u8]) -> i32 {
@@ -829,6 +870,18 @@ fn handle_stream_transition(core: &mut Core, before: SourceState, after: SourceS
             } else {
                 media_begin_tone(core)
             }
+        }
+        (SourceState::Starting, SourceState::Open) => {
+            // The sink refused START. Only this playback attempt fails: the
+            // stream stays configured and the next play sends START again.
+            let external = r.media_flags.load(Ordering::Acquire) & MEDIA_FLAG_EXTERNAL_STREAM != 0;
+            media_cancel_timer();
+            if external {
+                audio_stream::transport_lost(ERR_REMOTE);
+            }
+            r.media_state.store(MEDIA_COMPLETE, Ordering::Release);
+            r.last_error.store(ERR_REMOTE, Ordering::Release);
+            0
         }
         (SourceState::Streaming, SourceState::Open) => {
             // SUSPEND accepted; the producer will issue START again when data is
@@ -981,6 +1034,9 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
                 let before = core.source.state;
                 let result = core.source.receive(input, &mut core.signaling_out);
                 let after = core.source.state;
+                let (signal, code) = core.source.last_reject;
+                r.avdtp_reject
+                    .store(u32::from(signal) << 8 | u32::from(code), Ordering::Release);
                 sync_stream_state(core, after);
                 match result {
                     Ok(len) if len > 0 => {

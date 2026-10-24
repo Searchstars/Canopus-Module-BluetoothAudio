@@ -171,7 +171,7 @@ fn rejects_remote_start_until_media_channel_is_connected() {
     source.local_in_use = true;
 
     let n = source.receive(&[0x40, 0x07, 0x04], &mut out).unwrap();
-    assert_eq!(&out[..n], &[0x43, 0x07, 0x31]);
+    assert_eq!(&out[..n], &[0x43, 0x07, 0x04, 0x31]);
     assert_eq!(source.state, State::Open);
 
     source.media_connected = true;
@@ -283,4 +283,105 @@ fn falls_back_to_joint_stereo_when_stereo_is_unavailable() {
     assert_eq!(out[10], 0x21);
     assert_eq!(out[12], 27);
     assert_eq!(out[13], 39);
+}
+
+/// Drives a source through DISCOVER (AAC sink SEID 1, SBC sink SEID 2), the
+/// AAC capabilities, and the full SBC capability set AirPods-class sinks
+/// advertise, up to Open.
+fn open_with_aac_first_sink(source: &mut Source, out: &mut [u8]) {
+    source.connected(out).unwrap();
+    let n = source
+        .receive(&[0x02, 0x01, 0x04, 0x08, 0x08, 0x08], out)
+        .unwrap();
+    assert_eq!(&out[..n], &[0x10, 0x0c, 0x04]);
+    // SEID 1: media transport, AAC, content protection (SCMS-T), delay reporting.
+    let aac = [
+        0x12, 0x0c, 1, 0, 7, 8, 0x00, 0x02, 0x80, 0x01, 0x8c, 0x84, 0xe2, 0x00, 4, 2, 2, 0, 8, 0,
+    ];
+    let n = source.receive(&aac, out).unwrap();
+    assert_eq!(&out[..n], &[0x20, 0x0c, 0x08]);
+    // SEID 2: every SBC option, bitpool 2..53, content protection, delay reporting.
+    let sbc = [
+        0x22, 0x0c, 1, 0, 7, 6, 0, 0, 0xff, 0xff, 2, 53, 4, 2, 2, 0, 8, 0,
+    ];
+    let n = source.receive(&sbc, out).unwrap();
+    assert_eq!(source.state, State::Configuring);
+    assert_eq!(source.remote_seid, 2);
+    assert_eq!(source.selected_sbc.frequency_channel, 0x22);
+    assert_eq!(source.selected_sbc.maximum_bitpool, 39);
+    assert!(source.delay_reporting);
+    // SET_CONFIGURATION: ACP 2, INT 1, transport, SBC 0x22/0x15/27/39, delay reporting.
+    assert_eq!(
+        &out[..n],
+        &[
+            0x30, 0x03, 0x08, 0x04, 1, 0, 7, 6, 0, 0, 0x22, 0x15, 27, 39, 8, 0
+        ]
+    );
+    let n = source.receive(&[0x32, 0x03], out).unwrap();
+    assert_eq!(&out[..n], &[0x40, 0x06, 0x08]);
+    assert_eq!(source.receive(&[0x42, 0x06], out).unwrap(), 0);
+    assert_eq!(source.state, State::Open);
+}
+
+#[test]
+fn negotiates_sbc_behind_an_aac_first_sink() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    open_with_aac_first_sink(&mut source, &mut out);
+}
+
+#[test]
+fn refuses_a_sink_initiated_configuration_without_failing() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    source.connected(&mut out).unwrap();
+    // The sink discovers us and tries to configure our SEP before our DISCOVER is answered.
+    let n = source.receive(&[0x50, 0x01], &mut out).unwrap();
+    assert_eq!(&out[..n], &[0x52, 0x01, 0x04, 0x00]);
+    let set = [0x60, 0x03, 0x04, 0x08, 1, 0, 7, 6, 0, 0, 0x21, 0x15, 2, 53];
+    let n = source.receive(&set, &mut out).unwrap();
+    assert_eq!(&out[..n], &[0x63, 0x03, 0x00, 0x13]);
+    let n = source.receive(&[0x70, 0x06, 0x04], &mut out).unwrap();
+    assert_eq!(&out[..n], &[0x73, 0x06, 0x31]);
+    // Our own negotiation carries on.
+    assert_eq!(source.state, State::Discovering);
+    let n = source.receive(&[0x02, 0x01, 0x08, 0x08], &mut out).unwrap();
+    assert_eq!(&out[..n], &[0x10, 0x0c, 0x08]);
+}
+
+#[test]
+fn ignores_stale_responses() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    open_with_aac_first_sink(&mut source, &mut out);
+    // A second accept for the OPEN that already completed, and an accept with a
+    // transaction label nothing is waiting on.
+    assert_eq!(source.receive(&[0x42, 0x06], &mut out).unwrap(), 0);
+    assert_eq!(source.receive(&[0x92, 0x07], &mut out).unwrap(), 0);
+    assert_eq!(
+        source.receive(&[0x93, 0x07, 0x08, 0x31], &mut out).unwrap(),
+        0
+    );
+    assert_eq!(source.state, State::Open);
+    assert_eq!(source.last_reject, (0, 0));
+}
+
+#[test]
+fn a_refused_start_leaves_the_stream_open() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    open_with_aac_first_sink(&mut source, &mut out);
+    source.media_connected = true;
+    source.start(&mut out).unwrap();
+    let transaction = out[0] >> 4;
+    assert_eq!(source.state, State::Starting);
+    // START reject: ACP SEID 2, BAD_STATE.
+    let n = source
+        .receive(&[(transaction << 4) | 0x03, 0x07, 0x08, 0x31], &mut out)
+        .unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(source.state, State::Open);
+    assert_eq!(source.last_reject, (0x07, 0x31));
+    // A later START goes out normally.
+    assert!(source.start(&mut out).is_ok());
 }

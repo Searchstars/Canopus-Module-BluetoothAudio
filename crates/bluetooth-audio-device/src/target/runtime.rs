@@ -185,6 +185,15 @@ pub struct Runtime {
     pub media_packets_queued: AtomicU32,
     pub media_packets_completed: AtomicU32,
     pub media_startup_silence_queued: AtomicU32,
+    /// Monotonic ms of the last media flow progress: a returned credit, or the
+    /// first SDU queued while none was outstanding.
+    pub media_flow_progress_ms: AtomicU32,
+    /// Credits written off because the stack stopped returning them, in total
+    /// and since the last credit that did come back.
+    pub media_flow_reclaims: AtomicU32,
+    pub media_flow_reclaim_streak: AtomicU32,
+    /// `signal << 8 | error code` of the last AVDTP command the sink refused.
+    pub avdtp_reject: AtomicU32,
     pub media_packets_sent: AtomicU32,
     pub media_frames_sent: AtomicU32,
     pub media_packets_target: AtomicU32,
@@ -263,6 +272,10 @@ impl Runtime {
             media_packets_queued: AtomicU32::new(0),
             media_packets_completed: AtomicU32::new(0),
             media_startup_silence_queued: AtomicU32::new(0),
+            media_flow_progress_ms: AtomicU32::new(0),
+            media_flow_reclaims: AtomicU32::new(0),
+            media_flow_reclaim_streak: AtomicU32::new(0),
+            avdtp_reject: AtomicU32::new(0),
             media_packets_sent: AtomicU32::new(0),
             media_frames_sent: AtomicU32::new(0),
             media_packets_target: AtomicU32::new(0),

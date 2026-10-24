@@ -101,6 +101,9 @@ struct Pipeline {
 
 static PIPELINE: AtomicUsize = AtomicUsize::new(0);
 static WAKE_QUEUED: AtomicBool = AtomicBool::new(false);
+/// The armed audio timer is only the flow-stall fallback, which a returned
+/// credit replaces with an immediate pump.
+static FLOW_WAIT_TIMER: AtomicBool = AtomicBool::new(false);
 static WAKE_RUNTIME_GENERATION: AtomicU32 = AtomicU32::new(0);
 static WAKE_AUDIO_GENERATION: AtomicU32 = AtomicU32::new(0);
 static AUDIO_STAGE: AtomicU32 = AtomicU32::new(AUDIO_STAGE_IDLE);
@@ -670,6 +673,9 @@ fn dispatch(core: &mut Core, command: u8, generation: u32) -> i32 {
                 return 0;
             }
             if runtime().media_state.load(Ordering::Acquire) == MEDIA_STREAMING {
+                if FLOW_WAIT_TIMER.load(Ordering::Acquire) {
+                    cancel_timer();
+                }
                 pump_active(core, generation)
             } else if runtime().media_state.load(Ordering::Acquire) == MEDIA_COMPLETE {
                 match transport::start_audio(core, generation) {
@@ -751,7 +757,9 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
         return pump_active(core, generation);
     }
     let sbc = &core.source.selected_sbc;
-    if sbc.frequency_channel != 0x22
+    // Live audio encodes both negotiated channel modes: stereo (0x22) and the
+    // joint-stereo fallback (0x21).
+    if !matches!(sbc.frequency_channel, 0x22 | 0x21)
         || sbc.blocks_subbands_allocation != 0x15
         || sbc.minimum_bitpool > sbc.maximum_bitpool
     {
@@ -871,14 +879,21 @@ fn pump_startup_silence(core: &mut Core, pipeline: &mut Pipeline) -> Result<bool
     }
     if pipeline.startup_packets_remaining == 0 {
         if runtime().media_tx_outstanding.load(Ordering::Acquire) != 0 {
-            return Ok(false);
+            // Music starts once the sink holds all the silence.
+            return match wait_for_flow_credit(pipeline.session_generation) {
+                0 => Ok(false),
+                error => Err(error),
+            };
         }
         pipeline.startup_complete = true;
         pipeline.clock.reset();
         return Ok(true);
     }
     if !transport::media_flow_available() {
-        return Ok(false);
+        return match wait_for_flow_credit(pipeline.session_generation) {
+            0 => Ok(false),
+            error => Err(error),
+        };
     }
 
     let packet_frames = pipeline
@@ -955,7 +970,7 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         }
         if !transport::media_flow_available() {
             // The flow-credit callback wakes the pump again.
-            return 0;
+            return wait_for_flow_credit(generation);
         }
         let now = monotonic_ms();
         if let Some(now) = now {
@@ -972,7 +987,9 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         let Some(now) = now else {
             // No clock to pace against: one packet per packet interval.
             return match pipeline.packetizer() {
-                Ok(packetizer) => schedule_timer(packetizer.next_delay_ms(packet_frames), generation),
+                Ok(packetizer) => {
+                    schedule_timer(packetizer.next_delay_ms(packet_frames), generation)
+                }
                 Err(error) => error,
             };
         };
@@ -982,6 +999,33 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
     }
     // Still behind after a full burst: let the owner thread run other work, then continue.
     schedule_timer(1, generation)
+}
+
+/// How long every media credit may stay out before the pump writes them off. Flow events come
+/// back within a few packet intervals on a healthy link; this only catches ones that never do.
+const FLOW_STALL_MS: u32 = 500;
+
+/// Waits for credits to come back. Normally the flow event pumps again; if it has not come for
+/// [`FLOW_STALL_MS`], write the credits off and carry on rather than stay silent for good.
+fn wait_for_flow_credit(generation: u32) -> i32 {
+    let Some(stalled) = transport::media_flow_idle_ms() else {
+        return 0;
+    };
+    if stalled < FLOW_STALL_MS {
+        if runtime().audio_timer_handle.load(Ordering::Acquire) != 0 {
+            return 0;
+        }
+        let scheduled = schedule_timer(FLOW_STALL_MS - stalled, generation);
+        if scheduled == 0 {
+            FLOW_WAIT_TIMER.store(true, Ordering::Release);
+        }
+        return scheduled;
+    }
+    if transport::reclaim_media_flow_credits() {
+        schedule_timer(1, generation)
+    } else {
+        0
+    }
 }
 
 /// Moves input into the decoder, decodes when the PCM buffer runs short and sends one RTP packet.
@@ -1257,6 +1301,7 @@ fn audio_timer_callback_impl(
         {
             return 0;
         }
+        FLOW_WAIT_TIMER.store(false, Ordering::Release);
         if owner_valid == 0 || event != AUDIO_TIMER_EVENT as i32 {
             ERR_AUDIO_QUEUE
         } else {
@@ -1317,6 +1362,7 @@ pub fn transport_lost(error: i32) {
 
 pub fn cancel_timer() {
     let r = runtime();
+    FLOW_WAIT_TIMER.store(false, Ordering::Release);
     r.audio_timer_generation.fetch_add(1, Ordering::AcqRel);
     let mut handle = r.audio_timer_handle.swap(0, Ordering::AcqRel);
     if handle != 0 {
