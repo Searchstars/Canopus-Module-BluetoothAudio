@@ -250,6 +250,27 @@ These do not replace firmware ordering or pairing behavior:
 - Critical callback payloads are moved to Bluetooth-owner queued work if the
   Rust core lock is temporarily busy; the original firmware callback never
   blocks.
+- AVDTP responses that answer no pending command (late, duplicate, or with a
+  stale transaction label) are ignored instead of failing the transport. A
+  refused START or SUSPEND leaves the stream where it was: the link stays up,
+  only that playback attempt fails (`-1105`), and the next play sends START
+  again. Sink-initiated SET CONFIGURATION is refused with a well-formed Reject
+  (`category 0, SEP_IN_USE`) rather than a General Reject, OPEN with
+  `BAD_STATE`, RECONFIGURE with `category 0, BAD_STATE`, and remote START or
+  SUSPEND rejects carry the ACP SEID before the error code. The last refusal's
+  signal and error code are kept for the diagnostics page.
+- Live audio holds at most `MAX_MEDIA_TX_OUTSTANDING` SDUs in the stock queue
+  and normally waits for event 8 to return each credit. When no credit has
+  come back for 500 ms while the pump is waiting, the outstanding credits are
+  written off and the stream continues; at most three write-offs in a row,
+  after which only event 8 resumes it. The count appears on the diagnostics
+  page (`TX queue … r<n>`), so a peer whose flow events never arrive is
+  visible instead of silent.
+- The package ships the launcher artwork as an LVGL image resource, delivered
+  to `/data/canopus/m.bluetooth_audio/appicon_headphones.bin`; the launcher
+  entry and the in-app headline use it, falling back to the
+  `/data/canopus/appicon_headphones.bin` that the installer watchfaces stage.
+  Without either file the stock launcher omits the entry.
 - Short `&'static str` constants contribute their length words to the mergeable
   `.rodata.cst8` section, and a packed 4-byte group can alias the target XIP
   window (`0x0C000000..0x0C500000`): the verifier then reports it as an

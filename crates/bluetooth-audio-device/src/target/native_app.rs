@@ -3,7 +3,7 @@
 //! registration and Launcher publication are intentionally separate invocations
 //! so miwear can process the app-registry event before Launcher persistence.
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use canopus_target_private::*;
 
@@ -11,15 +11,46 @@ use super::runtime::*;
 use super::ui_backend;
 
 pub const APP_ID: u16 = 0x00CB;
-pub const PAGE_COUNT: usize = 2;
+pub const PAGE_COUNT: usize = 3;
 pub const PAGE_OVERVIEW: usize = 0;
 pub const PAGE_DETAIL: usize = 1;
+pub const PAGE_DIAGNOSTICS: usize = 2;
 
 pub const PACKAGE_NAME: &[u8] = b"com.canopus.headphones\0";
 pub const DISPLAY_NAME: &[u8] = &[0xE8, 0x80, 0xB3, 0xE6, 0x9C, 0xBA, 0];
-pub const LAUNCHER_ICON: &[u8] = b"/data/canopus/appicon_headphones.bin\0";
+/// The headset artwork (a 117x117 LVGL image) also serves as the launcher
+/// icon. A package install delivers it into the module's own resource
+/// directory; the older installer watchfaces staged it one level up.
+const ICON_PATHS: [&[u8]; 2] = [
+    b"/data/canopus/m.bluetooth_audio/appicon_headphones.bin\0",
+    b"/data/canopus/appicon_headphones.bin\0",
+];
 const PAGE_NAME_OVERVIEW: &[u8] = b"headphones\0";
 const PAGE_NAME_DETAIL: &[u8] = b"headphones_detail\0";
+const PAGE_NAME_DIAGNOSTICS: &[u8] = b"headphones_diagnostics\0";
+const O_RDONLY: i32 = 1;
+
+/// 1 + index into [`ICON_PATHS`] once one was found; 0 until then.
+static ICON_FOUND: AtomicU8 = AtomicU8::new(0);
+
+/// The NUL-terminated path of the headset artwork, if it is on disk. A miss is
+/// not remembered: resources can arrive after the module loads.
+pub fn icon_path() -> Option<&'static [u8]> {
+    let found = ICON_FOUND.load(Ordering::Acquire);
+    if found != 0 {
+        return Some(ICON_PATHS[usize::from(found - 1)]);
+    }
+    let index = ICON_PATHS.iter().position(|path| {
+        let fd = unsafe { nuttx_open(path.as_ptr(), O_RDONLY) };
+        if fd < 0 {
+            return false;
+        }
+        unsafe { nuttx_close(fd) };
+        true
+    })?;
+    ICON_FOUND.store(index as u8 + 1, Ordering::Release);
+    Some(ICON_PATHS[index])
+}
 
 static mut APP_DESCRIPTOR: core::mem::MaybeUninit<launcher_app_descriptor> =
     core::mem::MaybeUninit::uninit();
@@ -70,7 +101,8 @@ fn app_descriptor_init() {
     unsafe {
         let app = &mut *core::ptr::addr_of_mut!(APP_DESCRIPTOR).cast::<launcher_app_descriptor>();
         app.package_name = PACKAGE_NAME.as_ptr() as *mut core::ffi::c_void;
-        app.launcher_icon_resource = LAUNCHER_ICON.as_ptr() as *mut core::ffi::c_void;
+        app.launcher_icon_resource =
+            icon_path().unwrap_or(ICON_PATHS[0]).as_ptr() as *mut core::ffi::c_void;
         app.app_id = APP_ID;
         app.launcher_metadata_callback =
             launcher_display_name as *const () as *mut core::ffi::c_void;
@@ -140,11 +172,19 @@ pub fn install_stage(stage: u32) -> Result<(), i32> {
         app_descriptor_init();
         descriptor_init(PAGE_OVERVIEW, PAGE_NAME_OVERVIEW, PAGE_OVERVIEW as u16);
         descriptor_init(PAGE_DETAIL, PAGE_NAME_DETAIL, PAGE_DETAIL as u16);
+        descriptor_init(
+            PAGE_DIAGNOSTICS,
+            PAGE_NAME_DIAGNOSTICS,
+            PAGE_DIAGNOSTICS as u16,
+        );
 
         // SAFETY: descriptors are zeroed and fully initialized above; app_install
         // consumes the local pointer array synchronously and retains the descriptors.
-        let pages: [*mut firmware_page_descriptor; PAGE_COUNT] =
-            [page_descriptor_ptr(0), page_descriptor_ptr(1)];
+        let pages: [*mut firmware_page_descriptor; PAGE_COUNT] = [
+            page_descriptor_ptr(PAGE_OVERVIEW),
+            page_descriptor_ptr(PAGE_DETAIL),
+            page_descriptor_ptr(PAGE_DIAGNOSTICS),
+        ];
         let install_result = unsafe {
             app_install(
                 core::ptr::addr_of_mut!(APP_DESCRIPTOR).cast::<launcher_app_descriptor>(),

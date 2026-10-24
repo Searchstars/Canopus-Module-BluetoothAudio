@@ -37,7 +37,8 @@ use canopus_target_private::*;
 use canopus_bluetooth_audio_core::{
     ConnectionState, PAIR_DIAG_BONDED, PAIR_DIAG_DISPLAY, PAIR_DIAG_FILTER_HIT,
     PAIR_DIAG_MHDT_FIXED, PAIR_DIAG_MHDT_INSTALLED, PAIR_DIAG_REMOVE_CONFIRMED,
-    PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST, StreamState, ui,
+    PAIR_DIAG_REMOVE_PENDING, PAIR_DIAG_REQUEST, StreamState,
+    ui::{self, key},
 };
 
 use runtime::*;
@@ -55,6 +56,7 @@ pub mod volume_store;
 
 pub const PAGE_OVERVIEW: usize = native_app::PAGE_OVERVIEW;
 pub const PAGE_DETAIL: usize = native_app::PAGE_DETAIL;
+pub const PAGE_DIAGNOSTICS: usize = native_app::PAGE_DIAGNOSTICS;
 
 /// Resets the fixed static blocks and core state machines. Called from the
 /// module constructor exactly once per load.
@@ -261,11 +263,21 @@ fn sync_target_model(core: &mut Core) {
     let media_packets_queued = r.media_packets_queued.load(Ordering::Relaxed);
     let media_flow_events = r.media_packets_completed.load(Ordering::Relaxed);
     let media_tx_outstanding = r.media_tx_outstanding.load(Ordering::Acquire);
+    let media_flow_reclaims = r.media_flow_reclaims.load(Ordering::Relaxed);
+    let avdtp_reject = r.avdtp_reject.load(Ordering::Acquire) as u16;
     let startup_silence_packets = r.media_startup_silence_queued.load(Ordering::Relaxed);
-    let bitpool = if audio.negotiated_bitpool != 0 {
-        audio.negotiated_bitpool as u8
+    // The negotiated configuration describes the stream before anything plays.
+    let sbc = core.source.selected_sbc;
+    let remote_seid = core.source.remote_seid;
+    let (bitpool, sbc_frequency_channel) = if sbc.maximum_bitpool != 0 {
+        (sbc.maximum_bitpool, sbc.frequency_channel)
+    } else if audio.negotiated_bitpool != 0 {
+        (
+            audio.negotiated_bitpool as u8,
+            details.sbc_frequency_channel,
+        )
     } else {
-        details.bitpool
+        (details.bitpool, details.sbc_frequency_channel)
     };
     let audio_error = if audio.last_error != 0 {
         audio.last_error
@@ -277,6 +289,10 @@ fn sync_target_model(core: &mut Core) {
     let (audio_register_result, audio_probe_result, audio_probe_abi, audio_last_command) =
         audio_device::diagnostics();
     if details.bitpool != bitpool
+        || details.sbc_frequency_channel != sbc_frequency_channel
+        || details.remote_seid != remote_seid
+        || details.avdtp_reject != avdtp_reject
+        || details.media_flow_reclaims != media_flow_reclaims
         || details.audio_state != audio.state as u8
         || details.audio_stage != audio_stage
         || details.decoded_channels != audio.decoded_channels as u8
@@ -303,6 +319,10 @@ fn sync_target_model(core: &mut Core) {
         || details.audio_last_command != audio_last_command
     {
         details.bitpool = bitpool;
+        details.sbc_frequency_channel = sbc_frequency_channel;
+        details.remote_seid = remote_seid;
+        details.avdtp_reject = avdtp_reject;
+        details.media_flow_reclaims = media_flow_reclaims;
         details.audio_state = audio.state as u8;
         details.audio_stage = audio_stage;
         details.decoded_channels = audio.decoded_channels as u8;
@@ -334,17 +354,24 @@ fn sync_target_model(core: &mut Core) {
     }
 }
 
+fn build_page(
+    page_index: usize,
+    model: &canopus_bluetooth_audio_core::Model,
+) -> Result<canopus_ui_core::Snapshot, canopus_ui_core::UiError> {
+    match page_index {
+        PAGE_DETAIL => ui::detail(model),
+        PAGE_DIAGNOSTICS => ui::diagnostics(model),
+        _ => ui::overview(model),
+    }
+}
+
 /// Builds the semantic snapshot for `page_index` from the current model and
 /// applies it to the stock LVX page. Runs on the page owner thread only.
 pub fn rebuild(page_index: usize) -> i32 {
     let snapshot = with_core(|core| {
         sync_target_model(core);
         let model = &core.controller.model;
-        let built = if page_index == PAGE_DETAIL {
-            ui::detail(model)
-        } else {
-            ui::overview(model)
-        };
+        let built = build_page(page_index, model);
         built.map(|mut snap| {
             snap.generation = model.generation;
             snap
@@ -386,11 +413,7 @@ pub fn rebuild_if_changed(page_index: usize, rendered_generation: u32) -> i32 {
         if model.generation == rendered_generation {
             return None;
         }
-        let built = if page_index == PAGE_DETAIL {
-            ui::detail(model)
-        } else {
-            ui::overview(model)
-        };
+        let built = build_page(page_index, model);
         Some(built.map(|mut snap| {
             snap.generation = model.generation;
             snap
@@ -418,10 +441,11 @@ pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u
         // render and the tap left the scan button dead on first entry.
         if matches!(
             (key, event_id),
-            (21, ui::EVENT_SCAN)
-                | (31, ui::EVENT_REFRESH)
-                | (11, ui::EVENT_CONNECTED_DETAIL)
-                | (1, ui::EVENT_BACK)
+            (key::SCAN, ui::EVENT_SCAN)
+                | (key::REFRESH, ui::EVENT_REFRESH)
+                | (key::DETAIL, ui::EVENT_CONNECTED_DETAIL)
+                | (key::DIAGNOSTICS, ui::EVENT_DIAGNOSTICS)
+                | (key::PAGE, ui::EVENT_BACK)
         ) {
             return true;
         }
@@ -436,21 +460,14 @@ pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u
                 .get(index)
                 .is_some_and(|device| key == ui::device_key(device.address));
         }
-        let valid = matches!(
-            (key, event_id),
-            (11, ui::EVENT_CONNECTED_DETAIL)
-                | (21, ui::EVENT_SCAN)
-                | (31, ui::EVENT_REFRESH)
-                | (36, ui::EVENT_DISCONNECT)
-                | (1, ui::EVENT_BACK)
-        );
+        let valid = (key, event_id) == (key::DISCONNECT, ui::EVENT_DISCONNECT);
         #[cfg(not(feature = "production"))]
         let valid = valid
             || matches!(
                 (key, event_id),
-                (34, ui::EVENT_TEST_TONE)
-                    | (35, ui::EVENT_LONG_MP3)
-                    | (44, ui::EVENT_LONG_MP3_DECODE_ONLY)
+                (key::TEST_TONE, ui::EVENT_TEST_TONE)
+                    | (key::LONG_MP3, ui::EVENT_LONG_MP3)
+                    | (key::LONG_MP3_DECODE_ONLY, ui::EVENT_LONG_MP3_DECODE_ONLY)
             );
         valid
     });
@@ -464,6 +481,10 @@ fn handle_action(page_index: usize, event_id: u32) {
 
     if event_id == ui::EVENT_CONNECTED_DETAIL {
         ui_backend::navigate(PAGE_DETAIL);
+        return;
+    }
+    if event_id == ui::EVENT_DIAGNOSTICS {
+        ui_backend::navigate(PAGE_DIAGNOSTICS);
         return;
     }
     if event_id == ui::EVENT_BACK {

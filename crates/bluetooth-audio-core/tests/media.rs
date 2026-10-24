@@ -145,7 +145,10 @@ fn packet_clock_owes_the_packets_a_stall_held_back() {
         }
     }
     let audio_ms = u64::from(sent) * u64::from(PACKET) * 1_000 / 44_100;
-    assert!(audio_ms >= u64::from(now) && audio_ms <= u64::from(now) + 15, "{audio_ms} vs {now}");
+    assert!(
+        audio_ms >= u64::from(now) && audio_ms <= u64::from(now) + 15,
+        "{audio_ms} vs {now}"
+    );
 }
 
 #[test]

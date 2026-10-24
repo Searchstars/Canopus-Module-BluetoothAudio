@@ -102,6 +102,12 @@ pub struct LinkDetails {
     pub media_packets_queued: u32,
     pub media_flow_events: u32,
     pub media_tx_outstanding: u32,
+    /// Flow credits written off because the stack stopped returning them.
+    pub media_flow_reclaims: u32,
+    /// `signal << 8 | AVDTP error code` of the last command the sink refused.
+    pub avdtp_reject: u16,
+    /// Remote sink SEID the stream was configured on; 0 before negotiation.
+    pub remote_seid: u8,
     pub startup_silence_packets: u32,
     pub underruns: u32,
     /// Longest the media pacer has fallen behind real time in this stream, in milliseconds:

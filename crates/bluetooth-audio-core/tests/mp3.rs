@@ -231,7 +231,10 @@ fn assert_complete_resampled_packetization(
     assert_eq!(output_frames, expected_output);
     // A clock that divides by the MP3's own rate needs the MP3's own frame count; dividing the
     // 44.1-kHz output count by 48 kHz ran an 8 % slow clock.
-    assert_eq!(media_frames, decoded_mp3_frames * source_frames_per_mp3_frame);
+    assert_eq!(
+        media_frames,
+        decoded_mp3_frames * source_frames_per_mp3_frame
+    );
     assert!(packets > 0);
     assert_eq!(sbc_frames_encoded, output_frames / SBC_FRAMES);
     assert!(carry < SBC_FRAMES);
