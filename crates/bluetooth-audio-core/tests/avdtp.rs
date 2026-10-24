@@ -13,7 +13,7 @@ fn negotiates_audio_sink_and_sbc_441_stereo() {
     let packet = [0x12, 0x0c, 1, 0, 7, 6, 0, 0, 0x22, 0x15, 2, 53, 8, 0];
     let n = source.receive(&packet, &mut out).unwrap();
     assert_eq!(source.state, State::Configuring);
-    assert_eq!(source.selected_sbc.maximum_bitpool, 53);
+    assert_eq!(source.selected_sbc.maximum_bitpool, 39);
     assert_eq!(out[1], 3);
     assert_eq!(n, 16);
     let n = source.receive(&[0x22, 3], &mut out).unwrap();
@@ -128,7 +128,7 @@ fn reassembles_fragmented_capabilities() {
         .receive(&[0x1e, 0, 0x22, 0x15, 2, 53, 8, 0], &mut out)
         .unwrap();
     assert_eq!(source.state, State::Configuring);
-    assert_eq!(source.selected_sbc.maximum_bitpool, 53);
+    assert_eq!(source.selected_sbc.maximum_bitpool, 39);
     assert_eq!(n, 16);
 }
 
@@ -208,4 +208,79 @@ fn suspend_requires_a_live_link_and_remote_sep() {
     source.state = State::Streaming;
     source.remote_seid = 0;
     assert!(source.suspend(&mut out).is_err());
+}
+
+#[test]
+fn walks_to_the_sbc_sink_sep_when_the_first_one_is_aac() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    // DISCOVER returns sink SEID 2 (AAC only) and sink SEID 3 (SBC).
+    assert_eq!(source.connected(&mut out).unwrap(), 2);
+    let n = source
+        .receive(&[0x02, 0x01, 0x08, 0x08, 0x0c, 0x08], &mut out)
+        .unwrap();
+    // GET_ALL_CAPABILITIES is issued for the first sink SEP (SEID 2).
+    assert_eq!(&out[..n], &[0x10, 0x0c, 0x08]);
+    // SEID 2 answers with an AAC media-codec category (codec type 2).
+    let aac = [
+        0x12, 0x0c, 1, 0, 7, 6, 0x02, 0, 0x80, 0x0c, 0x60, 0xff, 8, 0,
+    ];
+    let n = source.receive(&aac, &mut out).unwrap();
+    // Negotiation advances to SEID 3 instead of failing with Unsupported.
+    assert_eq!(source.state, State::ReadingCapabilities);
+    assert_eq!(source.remote_seid, 3);
+    assert_eq!(&out[..n], &[0x20, 0x0c, 0x0c]);
+    // SEID 3 answers with a valid SBC configuration.
+    let sbc = [0x22, 0x0c, 1, 0, 7, 6, 0, 0, 0x22, 0x15, 2, 53, 8, 0];
+    let _ = source.receive(&sbc, &mut out).unwrap();
+    assert_eq!(source.state, State::Configuring);
+    assert_eq!(source.remote_seid, 3);
+    assert_eq!(source.selected_sbc.maximum_bitpool, 39);
+    assert_eq!(out[1], 3);
+    source.receive(&[0x32, 3], &mut out).unwrap();
+    assert_eq!(out[1], 6);
+    assert_eq!(source.receive(&[0x42, 6], &mut out).unwrap(), 0);
+    assert_eq!(source.state, State::Open);
+}
+
+#[test]
+fn reports_unsupported_once_every_sink_sep_lacks_sbc() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    source.connected(&mut out).unwrap();
+    source
+        .receive(&[0x02, 0x01, 0x08, 0x08, 0x0c, 0x08], &mut out)
+        .unwrap();
+    // Both SEPs answer with the AAC codec category.
+    let aac = [
+        0x12, 0x0c, 1, 0, 7, 6, 0x02, 0, 0x80, 0x0c, 0x60, 0xff, 8, 0,
+    ];
+    let n = source.receive(&aac, &mut out).unwrap();
+    assert_eq!(&out[..n], &[0x20, 0x0c, 0x0c]);
+    let aac = [
+        0x22, 0x0c, 1, 0, 7, 6, 0x02, 0, 0x80, 0x0c, 0x60, 0xff, 8, 0,
+    ];
+    assert!(matches!(
+        source.receive(&aac, &mut out),
+        Err(canopus_bluetooth_audio_core::avdtp::Error::Unsupported)
+    ));
+}
+
+#[test]
+fn falls_back_to_joint_stereo_when_stereo_is_unavailable() {
+    let mut source = Source::new(1);
+    let mut out = [0u8; 64];
+    assert_eq!(source.connected(&mut out).unwrap(), 2);
+    // Single sink SEP advertising 44.1 kHz + joint stereo only.
+    let n = source.receive(&[0x02, 0x01, 0x08, 0x08], &mut out).unwrap();
+    assert_eq!(&out[..n], &[0x10, 0x0c, 0x08]);
+    let joint = [0x12, 0x0c, 1, 0, 7, 6, 0, 0, 0x21, 0x15, 2, 53, 8, 0];
+    let _ = source.receive(&joint, &mut out).unwrap();
+    assert_eq!(source.state, State::Configuring);
+    assert_eq!(source.selected_sbc.frequency_channel, 0x21);
+    assert!(source.selected_sbc.joint());
+    // SET_CONFIGURATION carries the negotiated joint-stereo channel byte.
+    assert_eq!(out[10], 0x21);
+    assert_eq!(out[12], 27);
+    assert_eq!(out[13], 39);
 }

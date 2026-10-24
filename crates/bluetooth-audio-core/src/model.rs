@@ -87,6 +87,9 @@ pub struct LinkDetails {
     pub sbc_frequency_channel: u8,
     pub sbc_blocks_subbands_allocation: u8,
     pub bitpool: u8,
+    /// Media-codec capability bytes of the last SEP probed before an
+    /// `Unsupported` negotiation failure; all zero when unused.
+    pub sbc_caps: [u8; 6],
     pub packets_sent: u32,
     pub frames_sent: u32,
     pub audio_state: u8,

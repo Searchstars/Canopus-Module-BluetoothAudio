@@ -37,8 +37,9 @@ pub struct StreamPacketizer {
 }
 
 impl StreamPacketizer {
-    pub fn new(mtu: u16, bitpool: u8) -> Result<Self, MediaError> {
-        let frame_length = sbc_tone_frames::frame_length(bitpool).ok_or(MediaError::Codec)?;
+    pub fn new(mtu: u16, bitpool: u8, joint: bool) -> Result<Self, MediaError> {
+        let frame_length =
+            sbc_tone_frames::stream_frame_length(bitpool, joint).ok_or(MediaError::Codec)?;
         let limit = usize::from(mtu).min(MAX_TX_SDU);
         let mut frames = MAX_FRAMES_PER_PACKET;
         while frames > 1 && RTP_HEADER + SBC_HEADER + frames as usize * frame_length > limit {

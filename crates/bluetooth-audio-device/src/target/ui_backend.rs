@@ -280,8 +280,7 @@ fn hash_text(mut hash: u32, text: &str) -> u32 {
 fn layout_fingerprint(snapshot: &Snapshot) -> (u32, u32) {
     let mut hash = 0x811C_9DC5u32;
     let mut count = 0u32;
-    for index in 0..snapshot.node_count as usize {
-        let node = &snapshot.nodes[index];
+    for node in snapshot.nodes.iter().take(snapshot.node_count as usize) {
         let marker = match node.kind() {
             Some(NodeKind::Text) => 1,
             Some(NodeKind::StatusRow) => 2,
@@ -312,8 +311,7 @@ fn target_row_kind(kind: NodeKind) -> u8 {
 }
 
 fn snapshot_uses_row(snapshot: &Snapshot, kind: u8, key: u32) -> bool {
-    for index in 0..snapshot.node_count as usize {
-        let node = &snapshot.nodes[index];
+    for node in snapshot.nodes.iter().take(snapshot.node_count as usize) {
         let is_row = node.kind().is_some_and(|node_kind| {
             matches!(
                 node_kind,
@@ -380,8 +378,7 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
     // and rows are bounded.
     let mut visible_rows = 0u32;
     let mut visible_labels = 0u32;
-    for index in 0..snapshot.node_count as usize {
-        let node = &snapshot.nodes[index];
+    for node in snapshot.nodes.iter().take(snapshot.node_count as usize) {
         match node.kind() {
             Some(NodeKind::Section) | Some(NodeKind::NavigationPage) => {}
             Some(NodeKind::Text) => visible_labels += 1,
@@ -608,9 +605,9 @@ pub fn apply_snapshot(page_index: usize, snapshot: &Snapshot) -> i32 {
             };
         }
     }
-    for i in label_used as usize..UI_MAX_LABELS {
-        if !backend.labels[i].is_null() {
-            unsafe { lvx_set_hidden(backend.labels[i], 1) };
+    for label in backend.labels.iter().skip(label_used as usize) {
+        if !label.is_null() {
+            unsafe { lvx_set_hidden(*label, 1) };
         }
     }
     backend.layout_hash = next_layout_hash;

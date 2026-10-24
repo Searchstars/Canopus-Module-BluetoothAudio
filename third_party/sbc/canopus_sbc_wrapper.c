@@ -23,7 +23,7 @@ uint32_t canopus_sbc_encoder_size(void)
 }
 
 void *canopus_sbc_encoder_init(void *memory, uint32_t memory_size,
-                               uint8_t bitpool)
+                               uint8_t bitpool, uint8_t joint)
 {
     uintptr_t base;
     struct canopus_sbc_encoder *encoder;
@@ -31,7 +31,7 @@ void *canopus_sbc_encoder_init(void *memory, uint32_t memory_size,
     size_t private_size = sbc_get_private_size();
 
     if (memory == NULL || memory_size < canopus_sbc_encoder_size() ||
-        bitpool < 2u || bitpool > 250u)
+        bitpool < 2u || bitpool > 250u || joint > 1u)
         return NULL;
     base = ((uintptr_t)memory + CANOPUS_SBC_ALIGN - 1u) &
            ~((uintptr_t)CANOPUS_SBC_ALIGN - 1u);
@@ -43,7 +43,7 @@ void *canopus_sbc_encoder_init(void *memory, uint32_t memory_size,
     encoder->sbc.frequency = SBC_FREQ_44100;
     encoder->sbc.blocks = SBC_BLK_16;
     encoder->sbc.subbands = SBC_SB_8;
-    encoder->sbc.mode = SBC_MODE_STEREO;
+    encoder->sbc.mode = joint ? SBC_MODE_JOINT_STEREO : SBC_MODE_STEREO;
     encoder->sbc.allocation = SBC_AM_LOUDNESS;
     encoder->sbc.bitpool = bitpool;
     encoder->sbc.endian = SBC_LE;

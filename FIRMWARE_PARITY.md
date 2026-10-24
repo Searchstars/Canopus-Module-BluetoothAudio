@@ -161,6 +161,22 @@ does not explain the paired `2820 + 7F` selection.
   the highest peer-supported bitpool in its resident 27..53 encoder-frame range;
   REDMI's `02..27` capability therefore selects bitpool 39 instead of failing
   the previous hard requirement for 53.
+- Sink SEP iteration: DISCOVER retains up to eight audio sink SEIDs and
+  capability negotiation walks them in order — an SEP with no usable SBC
+  configuration, or one rejecting capability queries, advances to the next
+  discovered SEP before `Unsupported` is surfaced. This covers peers whose
+  first sink SEP is not the SBC one (observed as `-1107` with Xiaomi Buds 6).
+  The media-codec match also requires the SBC codec type nibble, so AAC-first
+  SEPs are skipped rather than mis-negotiated.
+- Joint-stereo fallback: sinks that advertise 44.1 kHz with joint stereo only
+  (`0x21`) are negotiated with `SBC_MODE_JOINT_STEREO` and a 13+2×bitpool
+  frame length; plain stereo (`0x22`) keeps priority. The live encoder and
+  `StreamPacketizer` follow the negotiated mode. The test tone plays
+  pre-encoded stereo frames and returns `ERR_AUDIO_CODEC` instead of
+  streaming garbage when joint stereo was negotiated; third-party audio
+  live-encodes in both modes. The last probed SEP's media-codec capability
+  bytes surface on the details page ("SBC bitpool" row) when negotiation
+  ends in `Unsupported`.
 - SBC capability bytes advertised locally: `0x22`, `0x15`, `27`, `53`.
 - Frame length is `12 + 2 * bitpool`: 90 bytes at bitpool 39 and 118 bytes at
   bitpool 53; samples per frame remain 128.
@@ -217,9 +233,34 @@ These do not replace firmware ordering or pairing behavior:
 
 - Eight-second removal and 60-second pairing watchdogs prevent a permanently
   pending UI transaction when an authoritative callback never arrives.
+- A refused AVDTP signaling connect is retried from the Bluetooth owner timer
+  before surfacing `-1101`: up to eight requests, 800 ms apart, bounded by the
+  module generation. Some sinks (observed on Xiaomi Buds 6) drop their ACL
+  link right after bonding and re-establish it within seconds, so the stock
+  queue can refuse the first connect requests although pairing just completed.
+  The retry touches only atomics and stock calls, never the core lock.
+- The bond preflight reclaims a parked transport before the READY gate: a
+  `TRANSPORT_FAILED` attempt with no live L2CAP CID is reset to READY (CIDs,
+  media state, retry budget, and last error cleared), a stranded
+  `TRANSPORT_WAIT_BOND` with no pending bond flags is returned to READY, and a
+  failed transport that may still hold live channels receives the same ordered
+  teardown as the user disconnect action first. Disconnect and remote-disconnect
+  completion accept `TRANSPORT_FAILED` for that path, so a failed attempt no
+  longer requires a reboot before the next try.
 - Critical callback payloads are moved to Bluetooth-owner queued work if the
   Rust core lock is temporarily busy; the original firmware callback never
   blocks.
+- Short `&'static str` constants contribute their length words to the mergeable
+  `.rodata.cst8` section, and a packed 4-byte group can alias the target XIP
+  window (`0x0C000000..0x0C500000`): the verifier then reports it as an
+  embedded firmware address while `scripts/encode-codec-words.py` only supports
+  `.rodata`, `.rodata.cst16`, and the SBC table sections, so the payload link
+  fails hard with `unsupported opaque-word section: .rodata.cst8`. This was hit
+  with a set of 12/15/18-byte CJK labels packing `0x0c0c0f0c`. The durable fix
+  is a `const uint8_t canopus_rodata_cst8_anchor[8]` in
+  `c_shim/canopus_ctor.c` plus a matching `ANCHORS` entry; that extends the
+  loader-facing opaque-word contract, so it needs its own device round. Until
+  then, avoid adding new short string constants to the module.
 - Media callback and timer generations reject stale work from a prior session.
 - L2CAP/SDP queue insertion returns are checked instead of silently waiting for
   callbacks that cannot arrive.

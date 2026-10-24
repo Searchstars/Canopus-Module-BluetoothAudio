@@ -28,10 +28,21 @@ const DISCONNECT_TIMER_EVENT: u8 = 11;
 const TONE_TIMER_EVENT: u8 = 12;
 const CALLBACK_RETRY_TAG: &[u8] = b"A2DPR\0";
 const CALLBACK_RETRY_DELAY_MS: u32 = 5;
-/// Keep at most two media SDUs inside the stock L2CAP queue. Queue acceptance
+const SIGNALING_CONNECT_RETRY_EVENT: u8 = 13;
+const SIGNALING_CONNECT_RETRY_TAG: &[u8] = b"A2DPQ\0";
+const SIGNALING_CONNECT_RETRY_DELAY_MS: u32 = 800;
+/// Bounded owner-timer retries for the AVDTP signaling connect. Some sinks
+/// (observed on Xiaomi Buds 6) drop their ACL link right after bonding and
+/// re-establish it within seconds, so the stock queue can refuse the first
+/// connect requests although pairing just completed.
+const SIGNALING_CONNECT_MAX_ATTEMPTS: u32 = 8;
+/// Keep at most four media SDUs inside the stock L2CAP queue. Queue acceptance
 /// transfers buffer ownership but is not proof that the controller consumed it;
-/// event 8 releases one flow credit.
-const MAX_MEDIA_TX_OUTSTANDING: u32 = 2;
+/// event 8 releases one flow credit. Two credits left no headroom for radio
+/// jitter on links without the BES mHDT high-throughput mode (Xiaomi Buds 6
+/// negotiate an 895-byte MTU), so every air hiccup surfaced as audible
+/// stutter; four absorb roughly 100 ms of delivery jitter.
+const MAX_MEDIA_TX_OUTSTANDING: u32 = 4;
 
 #[repr(C)]
 struct MediaRetryToken {
@@ -198,11 +209,7 @@ extern "C" fn sdp_work(_unused: i32, event: i32, argument: *mut core::ffi::c_voi
 // Signaling channel
 // ---------------------------------------------------------------------------
 
-fn submit_connect(address: &[u8; 6], expected: u32) -> Result<(), i32> {
-    let r = runtime();
-    if r.sdp_registered.load(Ordering::Acquire) == 0 {
-        return Err(ERR_STATE);
-    }
+fn fill_connect_request(address: &[u8; 6]) -> Result<*mut u8, i32> {
     let request = unsafe { bt_alloc(CONNECT_REQUEST_SIZE as u32) } as *mut u8;
     if request.is_null() {
         return Err(ERR_ALLOC);
@@ -217,6 +224,105 @@ fn submit_connect(address: &[u8; 6], expected: u32) -> Result<(), i32> {
         );
         core::ptr::copy_nonoverlapping(address.as_ptr(), request.add(CONNECT_ADDRESS_OFFSET), 6);
     }
+    Ok(request)
+}
+
+/// Allocates and enqueues one signaling connect request for a transport that
+/// already sits in CONNECTING. A zero return from the stock ABI means the
+/// queue insertion failed and no callback can ever arrive.
+fn queue_signaling_connect(address: &[u8; 6]) -> Result<(), i32> {
+    let request = fill_connect_request(address)?;
+    let queued = unsafe { bt_l2cap_connect(request as *mut core::ffi::c_void) };
+    if queued != 0 {
+        runtime()
+            .signaling_connect_attempts
+            .store(0, Ordering::Release);
+        return Ok(());
+    }
+    unsafe { bt_free(request as *mut core::ffi::c_void) };
+    Err(ERR_STATE)
+}
+
+fn arm_signaling_connect_retry() -> bool {
+    let r = runtime();
+    let attempt = r.signaling_connect_attempts.fetch_add(1, Ordering::AcqRel) + 1;
+    if attempt > SIGNALING_CONNECT_MAX_ATTEMPTS {
+        r.signaling_connect_attempts.store(0, Ordering::Release);
+        return false;
+    }
+    let owner = unsafe { bt_l2cap_owner() };
+    if owner.is_null() {
+        r.signaling_connect_attempts.store(0, Ordering::Release);
+        return false;
+    }
+    let token = unsafe { bt_alloc(4) } as *mut u32;
+    if token.is_null() {
+        r.signaling_connect_attempts.store(0, Ordering::Release);
+        return false;
+    }
+    unsafe { token.write(r.generation) };
+    if unsafe {
+        bt_timer_add(
+            owner,
+            SIGNALING_CONNECT_RETRY_DELAY_MS,
+            SIGNALING_CONNECT_RETRY_EVENT,
+            signaling_connect_retry_work as *const () as *mut core::ffi::c_void,
+            token.cast(),
+            SIGNALING_CONNECT_RETRY_TAG.as_ptr(),
+            1,
+        )
+    } == 0
+    {
+        unsafe { bt_free(token.cast()) };
+        r.signaling_connect_attempts.store(0, Ordering::Release);
+        return false;
+    }
+    true
+}
+
+extern "C" fn signaling_connect_retry_work(
+    _owner_valid: i32,
+    _event: i32,
+    argument: *mut core::ffi::c_void,
+) -> i32 {
+    let r = runtime();
+    if argument.is_null() {
+        return 0;
+    }
+    let generation = unsafe { argument.cast::<u32>().read() };
+    unsafe { bt_free(argument) };
+    if generation != r.generation {
+        return 0;
+    }
+    if r.transport_state.load(Ordering::Acquire) != TRANSPORT_CONNECTING {
+        return 0;
+    }
+    let Some(address) = target_load() else {
+        return 0;
+    };
+    if queue_signaling_connect(&address).is_ok() {
+        return 0;
+    }
+    // Refused again: keep waiting inside CONNECTING while the budget lasts.
+    if arm_signaling_connect_retry() {
+        return 0;
+    }
+    r.last_error.store(ERR_STATE, Ordering::Release);
+    let _ = r.transport_state.compare_exchange(
+        TRANSPORT_CONNECTING,
+        TRANSPORT_FAILED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+    0
+}
+
+fn submit_connect(address: &[u8; 6], expected: u32) -> Result<(), i32> {
+    let r = runtime();
+    if r.sdp_registered.load(Ordering::Acquire) == 0 {
+        return Err(ERR_STATE);
+    }
+    let request = fill_connect_request(address)?;
     if r.transport_state
         .compare_exchange(
             expected,
@@ -231,19 +337,26 @@ fn submit_connect(address: &[u8; 6], expected: u32) -> Result<(), i32> {
     }
     r.signaling_cid.store(0, Ordering::Release);
     r.signaling_mtu.store(0, Ordering::Release);
+    r.signaling_connect_attempts.store(0, Ordering::Release);
     r.last_error.store(0, Ordering::Release);
     let queued = unsafe { bt_l2cap_connect(request as *mut core::ffi::c_void) };
-    if queued == 0 {
-        r.last_error.store(ERR_STATE, Ordering::Release);
-        let _ = r.transport_state.compare_exchange(
-            TRANSPORT_CONNECTING,
-            expected,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        return Err(ERR_STATE);
+    if queued != 0 {
+        return Ok(());
     }
-    Ok(())
+    unsafe { bt_free(request as *mut core::ffi::c_void) };
+    // The peer may still be re-establishing its ACL link right after bonding
+    // (observed on Xiaomi Buds 6): retry from the owner timer before failing.
+    if arm_signaling_connect_retry() {
+        return Ok(());
+    }
+    r.last_error.store(ERR_STATE, Ordering::Release);
+    let _ = r.transport_state.compare_exchange(
+        TRANSPORT_CONNECTING,
+        expected,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+    Err(ERR_STATE)
 }
 
 /// Continues the AVDTP connection for `address` from READY (bonded) or from
@@ -341,7 +454,9 @@ pub fn disconnect() -> Result<(), i32> {
     let r = runtime();
     let state = r.transport_state.load(Ordering::Acquire);
     if state != TRANSPORT_WAIT_BOND
-        && ((state != TRANSPORT_CONNECTING && state != TRANSPORT_CONNECTED)
+        && ((state != TRANSPORT_CONNECTING
+            && state != TRANSPORT_CONNECTED
+            && state != TRANSPORT_FAILED)
             || r.signaling_cid.load(Ordering::Acquire) <= 0x3f)
     {
         return Err(ERR_STATE);
@@ -435,7 +550,7 @@ fn disconnect_owned() -> Result<(), i32> {
         }
         return Ok(());
     }
-    if (state != TRANSPORT_CONNECTING && state != TRANSPORT_CONNECTED)
+    if (state != TRANSPORT_CONNECTING && state != TRANSPORT_CONNECTED && state != TRANSPORT_FAILED)
         || r.signaling_cid.load(Ordering::Acquire) <= 0x3f
     {
         return Err(ERR_STATE);
@@ -468,6 +583,64 @@ fn disconnect_owned() -> Result<(), i32> {
         r.transport_state.store(state, Ordering::Release);
         return Err(error);
     }
+    Ok(())
+}
+
+/// Reclaims a failed or stranded-park transport so a new bond attempt can
+/// start without a reboot. `Ok(())` restores READY when no live L2CAP channel
+/// can exist; `Err(ERRNO_EBUSY)` means a real teardown was queued or is still
+/// required and the caller must retry once it completes. Runs under the core
+/// lock from the bond preflight and touches only atomics and stock calls.
+pub fn recover_parked() -> Result<(), i32> {
+    let r = runtime();
+    let state = r.transport_state.load(Ordering::Acquire);
+    if state != TRANSPORT_FAILED && state != TRANSPORT_WAIT_BOND {
+        return Ok(());
+    }
+    if state == TRANSPORT_WAIT_BOND {
+        // A bond transaction genuinely in flight must not be disturbed; a
+        // parked WAIT_BOND whose pending flags are clear is a stranded
+        // session (for example a dropped BOND_OK dispatch).
+        if flag(FLAG_BOND_PENDING | FLAG_REMOVE_PENDING) {
+            return Err(ERRNO_EBUSY);
+        }
+        if let Some(address) = target_load() {
+            bluetooth::cancel_connect_pairing(address);
+        }
+        r.signaling_cid.store(0, Ordering::Release);
+        r.signaling_mtu.store(0, Ordering::Release);
+        r.signaling_connect_attempts.store(0, Ordering::Release);
+        r.last_error.store(0, Ordering::Release);
+        let _ = r.transport_state.compare_exchange(
+            TRANSPORT_WAIT_BOND,
+            TRANSPORT_READY,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        return Ok(());
+    }
+    if r.signaling_cid.load(Ordering::Acquire) > 0x3f || r.media_cid.load(Ordering::Acquire) > 0x3f
+    {
+        // The firmware may still hold live channels. Request the same ordered
+        // teardown as the user disconnect action; its completion callback
+        // restores READY and resets the core state machines.
+        let _ = disconnect();
+        return Err(ERRNO_EBUSY);
+    }
+    if r.media_state.load(Ordering::Acquire) != MEDIA_IDLE {
+        r.media_generation.fetch_add(1, Ordering::AcqRel);
+        r.media_state.store(MEDIA_IDLE, Ordering::Release);
+    }
+    r.signaling_cid.store(0, Ordering::Release);
+    r.signaling_mtu.store(0, Ordering::Release);
+    r.signaling_connect_attempts.store(0, Ordering::Release);
+    r.last_error.store(0, Ordering::Release);
+    let _ = r.transport_state.compare_exchange(
+        TRANSPORT_FAILED,
+        TRANSPORT_READY,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
     Ok(())
 }
 
@@ -823,6 +996,17 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
                             avdtp::Error::State => ERR_STATE,
                             avdtp::Error::Packet | avdtp::Error::Overflow => ERR_PACKET,
                         };
+                        if error == avdtp::Error::Unsupported {
+                            let caps = core.source.last_codec_caps;
+                            r.sbc_caps_lo.store(
+                                u32::from_le_bytes([caps[0], caps[1], caps[2], caps[3]]),
+                                Ordering::Release,
+                            );
+                            r.sbc_caps_hi.store(
+                                u32::from_le_bytes([caps[4], caps[5], 0, 0]),
+                                Ordering::Release,
+                            );
+                        }
                         core.source.state = SourceState::Failed;
                         sync_stream_state(core, SourceState::Failed);
                         r.last_error.store(failure, Ordering::Release);
@@ -840,7 +1024,8 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
                 let state = r.transport_state.load(Ordering::Acquire);
                 if (state != TRANSPORT_CONNECTING
                     && state != TRANSPORT_CONNECTED
-                    && state != TRANSPORT_DISCONNECTING)
+                    && state != TRANSPORT_DISCONNECTING
+                    && state != TRANSPORT_FAILED)
                     || r.signaling_cid.load(Ordering::Acquire) <= 0x3f
                     || cid != r.signaling_cid.load(Ordering::Acquire) as u16
                 {
@@ -1685,6 +1870,12 @@ fn media_begin_tone(core: &mut Core) -> i32 {
     // Validate that the negotiated SBC configuration has a matching resident
     // frame. The source selects one fixed bitpool inside the peer's range.
     let sbc = &core.source.selected_sbc;
+    // The test tone plays pre-encoded stereo frames; a joint-stereo
+    // negotiation can only serve live-audio streams.
+    if sbc.joint() {
+        r.last_error.store(ERR_AUDIO_CODEC, Ordering::Release);
+        return ERR_AUDIO_CODEC;
+    }
     if sbc.frequency_channel != 0x22
         || sbc.blocks_subbands_allocation != 0x15
         || sbc.minimum_bitpool > sbc.maximum_bitpool

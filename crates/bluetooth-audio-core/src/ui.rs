@@ -113,7 +113,17 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
         model.details.media_mtu, model.details.avrcp_mtu
     );
     tree.status_row(31, "Link MTU", mtu.as_str())?;
-    let bitpool = unsigned(model.details.bitpool as u32);
+    let caps = &model.details.sbc_caps;
+    let mut bitpool = FixedText::<24>::default();
+    if model.details.bitpool == 0 && caps != &[0u8; 6] {
+        let _ = write!(
+            bitpool,
+            "caps {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+            caps[0], caps[1], caps[2], caps[3], caps[4], caps[5]
+        );
+    } else {
+        let _ = write!(bitpool, "{}", model.details.bitpool);
+    }
     tree.status_row(32, "SBC bitpool", bitpool.as_str())?;
     let packets = unsigned(model.details.packets_sent);
     tree.status_row(33, "Packets", packets.as_str())?;
