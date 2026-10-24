@@ -161,7 +161,8 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
     let idle = matches!(
         model.connection,
         ConnectionState::Disconnected | ConnectionState::Ready | ConnectionState::Failed
-    );
+    ) || (model.connection == ConnectionState::Configuring
+        && model.stream == StreamState::Failed);
     let scanning = matches!(model.scan, ScanState::Scanning | ScanState::Starting);
     tree.button(
         key::SCAN,

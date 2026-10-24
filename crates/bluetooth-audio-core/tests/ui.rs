@@ -83,6 +83,8 @@ fn overview_explains_an_unsupported_codec() {
         text(&snapshot, key::SUMMARY),
         "耳机不支持 SBC 音频格式\n错误 -1107"
     );
+    // Another headset can still be searched for.
+    assert!(snapshot.find_by_key(key::SCAN).unwrap().enabled());
 }
 
 #[test]
