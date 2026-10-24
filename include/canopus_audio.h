@@ -79,7 +79,9 @@ struct canopus_audio_status_v1 {
     uint32_t negotiated_bitpool;
     uint32_t bytes_accepted;
     uint32_t bytes_consumed;
-    uint32_t pcm_frames;
+    uint32_t pcm_frames;        /* decoded frames at decoded_sample_rate: the media
+                                   position is pcm_frames / decoded_sample_rate, also
+                                   for 24/48-kHz streams resampled to 44.1 kHz */
     uint32_t rtp_packets;
     uint32_t underruns;
     uint32_t generation;

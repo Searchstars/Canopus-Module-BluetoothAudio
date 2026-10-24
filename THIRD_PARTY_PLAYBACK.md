@@ -205,7 +205,7 @@ A Bluetooth-owner pump performs bounded work:
 6. duplicate mono to stereo;
 7. feed exactly 128 PCM samples per channel into the SBC encoder;
 8. aggregate negotiated SBC frames into RTP packets up to the media MTU;
-9. pace packets on the existing Bluetooth timer and respect PAUSE/STOP generations.
+9. pace packets on the existing Bluetooth timer against one anchor on the monotonic clock: packets a stalled owner thread could not send are sent back to back once it runs again (a stall longer than 400 ms is written off), and PAUSE/STOP generations are respected.
 
 The pump has a per-callback decode/frame budget so one application cannot monopolize the Bluetooth owner thread. If more work remains, it requeues itself.
 
@@ -234,7 +234,7 @@ struct canopus_audio_status_v1 {
 };
 ```
 
-Counters are wrapping 32-bit diagnostics. `generation` changes on START, STOP, FLUSH, close/open, and a new format; stale queued decoder/timer work compares its captured generation before touching the pipeline.
+Counters are wrapping 32-bit diagnostics. `pcm_frames` counts decoded frames at `decoded_sample_rate`, so `pcm_frames / decoded_sample_rate` is the playback position of the stream (before the sink's own delay), including 24- and 48-kHz streams that the pipeline resamples to 44.1 kHz. `generation` changes on START, STOP, FLUSH, close/open, and a new format; stale queued decoder/timer work compares its captured generation before touching the pipeline.
 
 ## 9. Error recovery
 

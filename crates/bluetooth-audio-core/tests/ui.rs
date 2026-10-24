@@ -131,6 +131,14 @@ fn detail_keeps_audio_diagnostics_topology_stable() {
         after.secondary(after.find_by_key(31).unwrap()),
         "media 0 / ctl 512"
     );
+
+    model.details.pacing_lag_ms = u32::MAX;
+    let late = ui::detail(&model).unwrap();
+    assert_eq!(late.node_count, after.node_count);
+    assert_eq!(
+        late.secondary(late.find_by_key(42).unwrap()),
+        "1 / late 4294967295 ms"
+    );
 }
 
 #[test]

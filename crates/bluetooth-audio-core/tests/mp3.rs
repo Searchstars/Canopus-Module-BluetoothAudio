@@ -78,11 +78,13 @@ fn decodes_frames_split_across_arbitrary_writes() {
                     samples,
                     sample_rate,
                     channels,
+                    source_frames,
                 } => {
                     assert!(consumed > 0);
                     assert_eq!(sample_rate, REQUIRED_SAMPLE_RATE);
                     assert_eq!(channels, 2);
                     assert_eq!(samples, frames * 2);
+                    assert_eq!(source_frames, frames);
                     assert!(pcm[..samples].iter().any(|sample| *sample != 0));
                     decoded_frames += frames;
                 }
@@ -149,6 +151,7 @@ fn assert_complete_resampled_packetization(
     let mut cursor = 0usize;
     let mut decoded_mp3_frames = 0usize;
     let mut output_frames = 0usize;
+    let mut media_frames = 0usize;
     let mut carry = 0usize;
     let mut packets = 0usize;
     let mut sbc_frames_encoded = 0usize;
@@ -172,6 +175,7 @@ fn assert_complete_resampled_packetization(
                     samples,
                     sample_rate,
                     channels,
+                    source_frames,
                     ..
                 } => {
                     assert_eq!(sample_rate, expected_rate);
@@ -179,6 +183,7 @@ fn assert_complete_resampled_packetization(
                     assert_eq!(samples, frames * 2);
                     decoded_mp3_frames += 1;
                     output_frames += frames;
+                    media_frames += source_frames;
                     carry += frames;
                     while carry >= SBC_FRAMES {
                         let encoded = (carry / SBC_FRAMES).min(SBC_FRAMES_PER_PACKET);
@@ -201,12 +206,14 @@ fn assert_complete_resampled_packetization(
                 frames,
                 sample_rate,
                 channels,
+                source_frames,
                 ..
             } => {
                 assert_eq!(sample_rate, expected_rate);
                 assert_eq!(channels, 2);
                 decoded_mp3_frames += 1;
                 output_frames += frames;
+                media_frames += source_frames;
                 carry += frames;
                 while carry >= SBC_FRAMES {
                     let encoded = (carry / SBC_FRAMES).min(SBC_FRAMES_PER_PACKET);
@@ -222,6 +229,9 @@ fn assert_complete_resampled_packetization(
     let expected_output = (decoded_mp3_frames * source_frames_per_mp3_frame * 44_100)
         .div_ceil(expected_rate as usize);
     assert_eq!(output_frames, expected_output);
+    // A clock that divides by the MP3's own rate needs the MP3's own frame count; dividing the
+    // 44.1-kHz output count by 48 kHz ran an 8 % slow clock.
+    assert_eq!(media_frames, decoded_mp3_frames * source_frames_per_mp3_frame);
     assert!(packets > 0);
     assert_eq!(sbc_frames_encoded, output_frames / SBC_FRAMES);
     assert!(carry < SBC_FRAMES);

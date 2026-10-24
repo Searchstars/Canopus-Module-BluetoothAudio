@@ -22,10 +22,15 @@ pub enum StreamProgress {
     },
     Frame {
         consumed: usize,
+        /// Stereo frames written to the output, at [`REQUIRED_SAMPLE_RATE`].
         frames: usize,
         samples: usize,
+        /// The MP3's own rate; differs from the output's when the frame was resampled.
         sample_rate: u32,
         channels: u8,
+        /// Frames the MP3 frame held at `sample_rate`: media time is
+        /// `source_frames / sample_rate`, whatever the resampler made of it.
+        source_frames: usize,
     },
 }
 
@@ -375,6 +380,7 @@ impl Mp3ByteStream {
                 samples,
                 sample_rate: frame.sample_rate,
                 channels: frame.channels,
+                source_frames: frame.frames,
             }
         };
         self.consume(frame.consumed);

@@ -160,7 +160,16 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
         model.details.avrcp_rx_length
     );
     tree.status_row(49, "AVRCP", avrcp.as_str())?;
-    let underruns = unsigned(model.details.underruns);
+    let mut underruns = FixedText::<32>::default();
+    if model.details.pacing_lag_ms == 0 {
+        let _ = write!(underruns, "{}", model.details.underruns);
+    } else {
+        let _ = write!(
+            underruns,
+            "{} / late {} ms",
+            model.details.underruns, model.details.pacing_lag_ms
+        );
+    }
     tree.status_row(42, "Underruns", underruns.as_str())?;
     let audio_error = number(model.details.audio_error);
     tree.status_row(43, "Audio error", audio_error.as_str())?;
@@ -171,11 +180,16 @@ pub fn detail(model: &Model) -> Result<Snapshot, UiError> {
         model.details.audio_elapsed_ms, model.details.decode_cpu_ms
     );
     tree.status_row(45, "Timing", timing.as_str())?;
+    // `pcm_frames` counts frames at the MP3's own rate (see `AudioInput::add_pcm_frames`).
+    let rate = match model.details.decoded_sample_rate {
+        0 => 44_100,
+        rate => u64::from(rate),
+    };
     let realtime_percent = if model.details.audio_elapsed_ms == 0 {
         0
     } else {
         (u64::from(model.details.pcm_frames) * 100_000
-            / (44_100 * u64::from(model.details.audio_elapsed_ms))) as u32
+            / (rate * u64::from(model.details.audio_elapsed_ms))) as u32
     };
     let mut speed = FixedText::<24>::default();
     let _ = write!(speed, "{}% realtime", realtime_percent);

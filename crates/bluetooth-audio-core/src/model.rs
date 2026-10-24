@@ -101,6 +101,9 @@ pub struct LinkDetails {
     pub media_tx_outstanding: u32,
     pub startup_silence_packets: u32,
     pub underruns: u32,
+    /// Longest the media pacer has fallen behind real time in this stream, in milliseconds:
+    /// how long the Bluetooth owner thread was kept from sending.
+    pub pacing_lag_ms: u32,
     pub audio_elapsed_ms: u32,
     pub decode_cpu_ms: u32,
     pub startup_ms: u32,

@@ -483,6 +483,9 @@ impl<const N: usize> AudioInput<N> {
         true
     }
 
+    /// Counts decoded frames at the MP3's own rate, the one `mark_playing` publishes as
+    /// `decoded_sample_rate`, so `pcm_frames / decoded_sample_rate` is the media position even
+    /// when the pipeline resamples to 44.1 kHz.
     pub fn add_pcm_frames(&self, generation: u32, frames: u32) {
         if self.generation() == generation {
             self.pcm_frames.fetch_add(frames, Ordering::Relaxed);

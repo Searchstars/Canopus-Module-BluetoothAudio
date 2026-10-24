@@ -117,6 +117,90 @@ impl StreamPacketizer {
     }
 }
 
+/// What [`PacketClock::poll`] asks of the sender.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Pace {
+    /// A packet is due (or overdue): send one, then poll again.
+    Send,
+    /// The stream is ahead of real time; poll again after this many milliseconds.
+    Wait(u32),
+}
+
+/// Paces media packets against one anchor on the monotonic clock instead of against the
+/// previous packet.
+///
+/// The sender runs on the Bluetooth owner thread, which the rest of the system can hold up for
+/// tens or hundreds of milliseconds. Pacing each packet relative to the last one turns every such
+/// stall into audio the sink never gets back: its presentation buffer drains and stays short, and
+/// the next stall is heard. Against a fixed anchor, packets that fell behind are owed and sent
+/// back to back once the thread runs again, which refills the sink before it runs dry. A stall
+/// longer than [`PacketClock::CATCH_UP_LIMIT_MS`] is written off by moving the anchor: the sink
+/// has run out by then (its buffer is the 150–230 ms start-up prefill), and sending the whole
+/// debt at once would only leave it holding more delay than it asked for.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PacketClock {
+    anchor_ms: u32,
+    sent_samples: u64,
+    running: bool,
+    /// Largest debt seen since the last [`Self::take_worst_lag_ms`], for diagnostics.
+    worst_lag_ms: u32,
+}
+
+impl PacketClock {
+    pub const CATCH_UP_LIMIT_MS: u32 = 400;
+
+    pub const fn new() -> Self {
+        Self {
+            anchor_ms: 0,
+            sent_samples: 0,
+            running: false,
+            worst_lag_ms: 0,
+        }
+    }
+
+    /// Forgets the anchor: the next poll starts real time anew (stream start, resume).
+    pub fn reset(&mut self) {
+        self.running = false;
+        self.sent_samples = 0;
+    }
+
+    /// Whether a packet is due at `now_ms`. Before the first packet of a run there is no anchor
+    /// yet and the answer is always [`Pace::Send`]: time spent skipping tags or waiting for input
+    /// before any audio left is nothing the sink is owed.
+    pub fn poll(&mut self, now_ms: u32) -> Pace {
+        if !self.running {
+            return Pace::Send;
+        }
+        let elapsed_us = u64::from(now_ms.wrapping_sub(self.anchor_ms)) * 1_000;
+        let sent_us = self.sent_samples * 1_000_000 / u64::from(SAMPLE_RATE);
+        if sent_us > elapsed_us {
+            return Pace::Wait(((sent_us - elapsed_us).div_ceil(1_000)).max(1) as u32);
+        }
+        let lag_ms = ((elapsed_us - sent_us) / 1_000).min(u64::from(u32::MAX)) as u32;
+        self.worst_lag_ms = self.worst_lag_ms.max(lag_ms);
+        if lag_ms > Self::CATCH_UP_LIMIT_MS {
+            self.anchor_ms = now_ms;
+            self.sent_samples = 0;
+        }
+        Pace::Send
+    }
+
+    /// Records a packet of `samples` (per channel) sent at `now_ms`; the first one of a run
+    /// anchors the clock.
+    pub fn sent(&mut self, now_ms: u32, samples: u32) {
+        if !self.running {
+            self.anchor_ms = now_ms;
+            self.sent_samples = 0;
+            self.running = true;
+        }
+        self.sent_samples = self.sent_samples.saturating_add(u64::from(samples));
+    }
+
+    pub fn take_worst_lag_ms(&mut self) -> u32 {
+        core::mem::take(&mut self.worst_lag_ms)
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TonePacketizer {
     pub sequence: u16,

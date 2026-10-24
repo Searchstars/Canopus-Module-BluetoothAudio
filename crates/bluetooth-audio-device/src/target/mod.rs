@@ -247,6 +247,7 @@ fn sync_target_model(core: &mut Core) {
         startup_prepare_ms,
         startup_avdtp_ms,
     ) = audio_stream::diagnostic_timing();
+    let pacing_lag_ms = audio_stream::diagnostic_pacing_lag_ms();
     let audio_stage = audio_stream::diagnostic_stage() as u8;
     let media_packets_queued = r.media_packets_queued.load(Ordering::Relaxed);
     let media_flow_events = r.media_packets_completed.load(Ordering::Relaxed);
@@ -279,6 +280,7 @@ fn sync_target_model(core: &mut Core) {
         || details.media_tx_outstanding != media_tx_outstanding
         || details.startup_silence_packets != startup_silence_packets
         || details.underruns != audio.underruns
+        || details.pacing_lag_ms != pacing_lag_ms
         || details.audio_elapsed_ms != audio_elapsed_ms
         || details.decode_cpu_ms != decode_cpu_ms
         || details.startup_ms != startup_ms
@@ -304,6 +306,7 @@ fn sync_target_model(core: &mut Core) {
         details.media_tx_outstanding = media_tx_outstanding;
         details.startup_silence_packets = startup_silence_packets;
         details.underruns = audio.underruns;
+        details.pacing_lag_ms = pacing_lag_ms;
         details.audio_elapsed_ms = audio_elapsed_ms;
         details.decode_cpu_ms = decode_cpu_ms;
         details.startup_ms = startup_ms;

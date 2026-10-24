@@ -10,7 +10,7 @@ use canopus_bluetooth_audio_core::{
     audio_input::{
         FORMAT_MP3, FormatV1, STATE_BUFFERING, STATE_DRAINING, STATE_PAUSED, STATE_PLAYING,
     },
-    media::{FRAME_SAMPLES, MAX_FRAMES_PER_PACKET, StreamPacketizer},
+    media::{FRAME_SAMPLES, MAX_FRAMES_PER_PACKET, Pace, PacketClock, StreamPacketizer},
     mp3::{MIN_DECODE_INPUT, Mp3ByteStream, StreamProgress},
 };
 use canopus_target_private::*;
@@ -42,6 +42,10 @@ const LONG_TEST_PREBUFFER: usize = MIN_DECODE_INPUT;
 const LONG_TEST_REFILL_LOW_WATER: usize = MIN_DECODE_INPUT;
 const LONG_TEST_REFILL_TARGET: usize = 4 * 1024;
 const DECODE_ONLY_STEP_DELAY_MS: u32 = 1;
+/// Packets one pump may send when the stream is behind real time. The flow window
+/// (`MAX_MEDIA_TX_OUTSTANDING`) usually stops a catch-up sooner; this bounds the decode and
+/// encode work one callback does on the Bluetooth owner thread.
+const MAX_PACKETS_PER_PUMP: usize = 3;
 const MAX_DECODED_PCM_FRAMES: usize = 1152;
 const PCM_FRAME_CAPACITY: usize =
     MAX_DECODED_PCM_FRAMES + MAX_FRAMES_PER_PACKET as usize * FRAME_SAMPLES as usize - 1;
@@ -90,7 +94,7 @@ struct Pipeline {
     packetizer_ready: bool,
     session_generation: u32,
     marker: bool,
-    next_packet_deadline_ms: u32,
+    clock: PacketClock,
     startup_packets_remaining: u8,
     startup_complete: bool,
 }
@@ -111,9 +115,15 @@ static QUEUE_LATENCY_MS: AtomicU32 = AtomicU32::new(0);
 static PREPARE_CPU_MS: AtomicU32 = AtomicU32::new(0);
 static AVDTP_STARTED_MS: AtomicU32 = AtomicU32::new(0);
 static AVDTP_WAIT_MS: AtomicU32 = AtomicU32::new(0);
+static PACING_LAG_MS: AtomicU32 = AtomicU32::new(0);
 
 pub fn diagnostic_stage() -> u32 {
     AUDIO_STAGE.load(Ordering::Acquire)
+}
+
+/// Longest the pacer has been behind real time since the stream began.
+pub fn diagnostic_pacing_lag_ms() -> u32 {
+    PACING_LAG_MS.load(Ordering::Acquire)
 }
 
 pub fn diagnostic_timing() -> (u32, u32, u32, u32, u32, u32) {
@@ -191,7 +201,7 @@ fn allocate_pipeline() -> Result<(&'static mut Pipeline, bool), i32> {
         core::ptr::addr_of_mut!((*allocation).packetizer_ready).write(false);
         core::ptr::addr_of_mut!((*allocation).session_generation).write(0);
         core::ptr::addr_of_mut!((*allocation).marker).write(true);
-        core::ptr::addr_of_mut!((*allocation).next_packet_deadline_ms).write(0);
+        core::ptr::addr_of_mut!((*allocation).clock).write(PacketClock::new());
         core::ptr::addr_of_mut!((*allocation).startup_packets_remaining).write(0);
         core::ptr::addr_of_mut!((*allocation).startup_complete).write(false);
     }
@@ -238,7 +248,7 @@ impl Pipeline {
         self.packetizer_ready = true;
         self.session_generation = generation;
         self.marker = true;
-        self.next_packet_deadline_ms = 0;
+        self.clock.reset();
         self.startup_packets_remaining = startup_packets;
         self.startup_complete = false;
         Ok(())
@@ -253,7 +263,7 @@ impl Pipeline {
         self.packetizer_ready = false;
         self.session_generation = generation;
         self.marker = true;
-        self.next_packet_deadline_ms = 0;
+        self.clock.reset();
         self.startup_packets_remaining = 0;
         self.startup_complete = false;
     }
@@ -276,29 +286,6 @@ impl Pipeline {
         }
         // SAFETY: encoder_ready tracks initialization of this field.
         Ok(unsafe { self.encoder.assume_init_mut() })
-    }
-
-    /// Keeps packet timestamps on the codec clock rather than adding decode,
-    /// encode, allocation, and callback runtime to every relative timer delay.
-    /// A late callback emits at most one packet and resets after 50 ms, so this
-    /// compensates ordinary work without an unbounded catch-up burst.
-    fn next_packet_delay(&mut self, frames: u8) -> Result<u32, i32> {
-        let interval = self.packetizer()?.next_delay_ms(frames);
-        let Some(now) = monotonic_ms() else {
-            return Ok(interval);
-        };
-        if self.next_packet_deadline_ms == 0 {
-            self.next_packet_deadline_ms = now.wrapping_add(interval);
-            return Ok(interval);
-        }
-        let lateness = now.wrapping_sub(self.next_packet_deadline_ms) as i32;
-        if lateness > 50 {
-            self.next_packet_deadline_ms = now.wrapping_add(interval);
-            return Ok(interval);
-        }
-        self.next_packet_deadline_ms = self.next_packet_deadline_ms.wrapping_add(interval);
-        let remaining = self.next_packet_deadline_ms.wrapping_sub(now) as i32;
-        Ok(if remaining > 0 { remaining as u32 } else { 1 })
     }
 }
 
@@ -694,6 +681,10 @@ fn dispatch(core: &mut Core, command: u8, generation: u32) -> i32 {
         }
         WORK_PAUSE => {
             cancel_timer();
+            // Resuming starts real time anew; the pause is no debt to catch up on.
+            if let Some(pipeline) = pipeline() {
+                pipeline.clock.reset();
+            }
             0
         }
         WORK_RESUME => {
@@ -745,7 +736,8 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
         && pipeline.ready_for(generation)
     {
         pipeline.marker = true;
-        pipeline.next_packet_deadline_ms = 0;
+        pipeline.clock.reset();
+        PACING_LAG_MS.store(0, Ordering::Release);
         pipeline.startup_packets_remaining = pipeline
             .packetizer()
             .map(|packetizer| packetizer.startup_packets(core.source.reported_delay_100us))
@@ -778,6 +770,7 @@ pub fn begin(core: &mut Core, generation: u32) -> i32 {
     ) {
         return error;
     }
+    PACING_LAG_MS.store(0, Ordering::Release);
     transport::reset_audio_media_flow();
     runtime()
         .media_state
@@ -836,6 +829,7 @@ fn pump_decode_only(generation: u32) -> i32 {
             frames,
             sample_rate,
             channels,
+            source_frames,
             ..
         }) => {
             if frames > PCM_FRAME_CAPACITY
@@ -843,7 +837,7 @@ fn pump_decode_only(generation: u32) -> i32 {
             {
                 return ERR_AUDIO_DECODE;
             }
-            input.add_pcm_frames(generation, frames as u32);
+            input.add_pcm_frames(generation, source_frames as u32);
             input.mark_playing(generation, sample_rate, channels as u32, 0);
             AUDIO_STAGE.store(AUDIO_STAGE_DECODE_ONLY, Ordering::Release);
             schedule_timer(DECODE_ONLY_STEP_DELAY_MS, generation)
@@ -878,7 +872,7 @@ fn pump_startup_silence(core: &mut Core, pipeline: &mut Pipeline) -> Result<bool
             return Ok(false);
         }
         pipeline.startup_complete = true;
-        pipeline.next_packet_deadline_ms = 0;
+        pipeline.clock.reset();
         return Ok(true);
     }
     if !transport::media_flow_available() {
@@ -937,7 +931,7 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
     if runtime().audio_timer_handle.load(Ordering::Acquire) != 0 {
         return 0;
     }
-    let mut state = input.state();
+    let state = input.state();
     if state == STATE_PAUSED {
         return 0;
     }
@@ -953,15 +947,56 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         Ok(false) => return 0,
         Err(error) => return error,
     }
-    if !transport::media_flow_available() {
-        return 0;
+    for _ in 0..MAX_PACKETS_PER_PUMP {
+        if input.state() == STATE_PAUSED {
+            return 0;
+        }
+        if !transport::media_flow_available() {
+            // The flow-credit callback wakes the pump again.
+            return 0;
+        }
+        let now = monotonic_ms();
+        if let Some(now) = now {
+            let pace = pipeline.clock.poll(now);
+            PACING_LAG_MS.fetch_max(pipeline.clock.take_worst_lag_ms(), Ordering::AcqRel);
+            if let Pace::Wait(delay) = pace {
+                return schedule_timer(delay, generation);
+            }
+        }
+        let packet_frames = match stream_packet(core, pipeline, input, generation) {
+            Ok(frames) => frames,
+            Err(result) => return result,
+        };
+        let Some(now) = now else {
+            // No clock to pace against: one packet per packet interval.
+            return match pipeline.packetizer() {
+                Ok(packetizer) => schedule_timer(packetizer.next_delay_ms(packet_frames), generation),
+                Err(error) => error,
+            };
+        };
+        pipeline
+            .clock
+            .sent(now, u32::from(packet_frames) * FRAME_SAMPLES);
     }
+    // Still behind after a full burst: let the owner thread run other work, then continue.
+    schedule_timer(1, generation)
+}
+
+/// Moves input into the decoder, decodes when the PCM buffer runs short and sends one RTP packet.
+/// `Ok` carries the packet's SBC frame count; `Err` is what the pump returns instead: a scheduled
+/// retry, `0` while waiting for input or after completion, or a failure.
+fn stream_packet(
+    core: &mut Core,
+    pipeline: &mut Pipeline,
+    input: &canopus_bluetooth_audio_core::audio_input::AudioInput<{ audio_device::INPUT_CAPACITY }>,
+    generation: u32,
+) -> Result<u8, i32> {
     let decoder_pending = pipeline.stream.pending();
     let refill = refill_long_test(input, &mut pipeline.ingest, decoder_pending);
     if refill != 0 {
-        return refill;
+        return Err(refill);
     }
-    state = input.state();
+    let state = input.state();
 
     while pipeline.stream.free() != 0 && input.ring.used() != 0 {
         let count = pipeline
@@ -975,13 +1010,13 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         }
         let pushed = pipeline.stream.push(&pipeline.ingest[..consumed]);
         if pushed != consumed {
-            return ERR_AUDIO_DECODE;
+            return Err(ERR_AUDIO_DECODE);
         }
     }
 
     let target_pcm_frames = match pipeline.packetizer() {
         Ok(packetizer) => packetizer.frames_per_packet as usize * FRAME_SAMPLES as usize,
-        Err(error) => return error,
+        Err(error) => return Err(error),
     };
     if pipeline.pcm_frames - pipeline.pcm_offset < target_pcm_frames {
         let carry = pipeline.pcm_frames - pipeline.pcm_offset;
@@ -1007,27 +1042,28 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
                 frames,
                 sample_rate,
                 channels,
+                source_frames,
                 ..
             }) => {
                 if !input.decoded_format_matches(sample_rate, channels as u32)
                     || carry + frames > PCM_FRAME_CAPACITY
                 {
-                    return ERR_AUDIO_DECODE;
+                    return Err(ERR_AUDIO_DECODE);
                 }
                 pipeline.pcm_frames = carry + frames;
                 AUDIO_STAGE.store(AUDIO_STAGE_PCM_READY, Ordering::Release);
-                input.add_pcm_frames(generation, frames as u32);
+                input.add_pcm_frames(generation, source_frames as u32);
                 let bitpool = match pipeline.packetizer() {
                     Ok(packetizer) => packetizer.bitpool as u32,
-                    Err(error) => return error,
+                    Err(error) => return Err(error),
                 };
                 input.mark_playing(generation, sample_rate, channels as u32, bitpool);
             }
-            Ok(StreamProgress::Skipped { .. }) => return schedule_timer(1, generation),
+            Ok(StreamProgress::Skipped { .. }) => return Err(schedule_timer(1, generation)),
             Ok(StreamProgress::NeedInput) if end_of_input && carry != 0 => {
                 let padded_frames = carry.div_ceil(FRAME_SAMPLES as usize) * FRAME_SAMPLES as usize;
                 if padded_frames > PCM_FRAME_CAPACITY {
-                    return ERR_AUDIO_DECODE;
+                    return Err(ERR_AUDIO_DECODE);
                 }
                 pipeline.pcm[carry * 2..padded_frames * 2].fill(0);
                 pipeline.pcm_frames = padded_frames;
@@ -1040,33 +1076,33 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
                 if LONG_TEST_OWNS_INPUT.load(Ordering::Acquire) {
                     release_long_test_input();
                 }
-                return 0;
+                return Err(0);
             }
             Ok(StreamProgress::NeedInput) => {
                 if state == STATE_PLAYING {
                     input.mark_underrun(generation);
                 }
-                return 0;
+                return Err(0);
             }
-            Err(_) => return ERR_AUDIO_DECODE,
+            Err(_) => return Err(ERR_AUDIO_DECODE),
         }
     }
 
     let remaining_frames = pipeline.pcm_frames - pipeline.pcm_offset;
     let frames_per_packet = match pipeline.packetizer() {
         Ok(packetizer) => packetizer.frames_per_packet as usize,
-        Err(error) => return error,
+        Err(error) => return Err(error),
     };
     let packet_frames = (remaining_frames / FRAME_SAMPLES as usize).min(frames_per_packet) as u8;
     if packet_frames == 0 {
-        return ERR_AUDIO_DECODE;
+        return Err(ERR_AUDIO_DECODE);
     }
     let (frame_length, packet_length) = match pipeline.packetizer() {
         Ok(packetizer) => match packetizer.packet_length(packet_frames) {
             Ok(length) => (packetizer.frame_length as usize, length),
-            Err(_) => return ERR_AUDIO_CODEC,
+            Err(_) => return Err(ERR_AUDIO_CODEC),
         },
-        Err(error) => return error,
+        Err(error) => return Err(error),
     };
     let marker = pipeline.marker;
     let payload = match pipeline.packetizer() {
@@ -1076,9 +1112,9 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
             marker,
         ) {
             Ok(payload) => payload,
-            Err(_) => return ERR_AUDIO_CODEC,
+            Err(_) => return Err(ERR_AUDIO_CODEC),
         },
-        Err(error) => return error,
+        Err(error) => return Err(error),
     };
     pipeline.marker = false;
 
@@ -1087,7 +1123,7 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         let pcm_begin = (pipeline.pcm_offset + frame_index * FRAME_SAMPLES as usize) * 2;
         let pcm_end = pcm_begin + FRAME_SAMPLES as usize * 2;
         if pcm_end > pipeline.pcm_frames * 2 {
-            return ERR_AUDIO_DECODE;
+            return Err(ERR_AUDIO_DECODE);
         }
         // SAFETY: the bounds check above proves this exact 256-sample SBC
         // window lies inside the initialized PCM frame.
@@ -1097,30 +1133,26 @@ fn pump_stream(core: &mut Core, generation: u32) -> i32 {
         let encoded = match pipeline.encoder() {
             Ok(encoder) => match encoder.encode(pcm, &mut core.media_out[frame_begin..frame_end]) {
                 Ok(encoded) => encoded,
-                Err(error) => return error,
+                Err(error) => return Err(error),
             },
-            Err(error) => return error,
+            Err(error) => return Err(error),
         };
         if encoded != frame_length {
-            return ERR_AUDIO_CODEC;
+            return Err(ERR_AUDIO_CODEC);
         }
     }
     if input.generation() != generation {
-        return 0;
+        return Err(0);
     }
     let send = transport::send_audio_media(&core.media_out[..packet_length]);
     if send != 0 {
-        return send;
+        return Err(send);
     }
     AUDIO_STAGE.store(AUDIO_STAGE_RTP, Ordering::Release);
     pipeline.pcm_offset += packet_frames as usize * FRAME_SAMPLES as usize;
     input.add_rtp_packets(generation, 1);
     update_elapsed();
-    let delay = match pipeline.next_packet_delay(packet_frames) {
-        Ok(delay) => delay,
-        Err(error) => return error,
-    };
-    schedule_timer(delay, generation)
+    Ok(packet_frames)
 }
 
 fn schedule_timer(delay_ms: u32, audio_generation: u32) -> i32 {
