@@ -22,5 +22,3 @@ include = [
   "xiaomi-band-11-4.100.179",
 ]
 
-[resources]
-files = ["watchfaces/bluetooth-audio/appicon_headphones.bin"]

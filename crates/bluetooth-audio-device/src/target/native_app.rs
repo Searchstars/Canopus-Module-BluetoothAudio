@@ -3,7 +3,7 @@
 //! registration and Launcher publication are intentionally separate invocations
 //! so miwear can process the app-registry event before Launcher persistence.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use canopus_target_private::*;
 
@@ -18,38 +18,114 @@ pub const PAGE_DIAGNOSTICS: usize = 2;
 
 pub const PACKAGE_NAME: &[u8] = b"com.canopus.headphones\0";
 pub const DISPLAY_NAME: &[u8] = &[0xE8, 0x80, 0xB3, 0xE6, 0x9C, 0xBA, 0];
-/// The headset artwork (a 117x117 LVGL image) also serves as the launcher
-/// icon. A package install delivers it into the module's own resource
-/// directory; the older installer watchfaces staged it one level up.
-const ICON_PATHS: [&[u8]; 2] = [
-    b"/data/canopus/m.bluetooth_audio/appicon_headphones.bin\0",
-    b"/data/canopus/appicon_headphones.bin\0",
-];
+/// The headset artwork, which is also the launcher icon: the stock launcher
+/// reads it by path as a 117x117 LVGL v9 ARGB8888 image and leaves the app out
+/// when the file is missing. The installer watchfaces stage this same file;
+/// a package install does not, so the module writes it itself.
+const ICON_PATH: &[u8] = b"/data/canopus/appicon_headphones.bin\0";
+const ICON_TEMP_PATH: &[u8] = b"/data/canopus/appicon_headphones.tmp\0";
 const PAGE_NAME_OVERVIEW: &[u8] = b"headphones\0";
 const PAGE_NAME_DETAIL: &[u8] = b"headphones_detail\0";
 const PAGE_NAME_DIAGNOSTICS: &[u8] = b"headphones_diagnostics\0";
-const O_RDONLY: i32 = 1;
+const O_WRONLY: i32 = 2;
+const O_CREAT: i32 = 4;
+const FILE_MODE: u32 = 0o644;
 
-/// 1 + index into [`ICON_PATHS`] once one was found; 0 until then.
-static ICON_FOUND: AtomicU8 = AtomicU8::new(0);
+/// Keeps the embedded icon word aligned for the verifier's word scan.
+#[repr(C)]
+struct Aligned<Align, Bytes: ?Sized> {
+    _align: [Align; 0],
+    bytes: Bytes,
+}
 
-/// The NUL-terminated path of the headset artwork, if it is on disk. A miss is
-/// not remembered: resources can arrive after the module loads.
-pub fn icon_path() -> Option<&'static [u8]> {
-    let found = ICON_FOUND.load(Ordering::Acquire);
-    if found != 0 {
-        return Some(ICON_PATHS[usize::from(found - 1)]);
+/// The icon as its LVGL header, a 256-entry ARGB8888 palette and one index
+/// per pixel (`scripts/encode-icon-palette.py`): 15 KB carried instead of 54.
+static ICON: &Aligned<u32, [u8]> = &Aligned {
+    _align: [],
+    bytes: *include_bytes!("../../assets/appicon_headphones.pal"),
+};
+const ICON_HEADER: usize = 12;
+const ICON_PALETTE: usize = 256 * 4;
+const ICON_SIDE: usize = 117;
+const ICON_ROW: usize = ICON_SIDE * 4;
+
+static ICON_READY: AtomicBool = AtomicBool::new(false);
+
+/// Row `y` of the icon in ARGB8888.
+fn icon_row(y: usize, out: &mut [u8; ICON_ROW]) {
+    let icon = &ICON.bytes;
+    let indices = &icon[ICON_HEADER + ICON_PALETTE + y * ICON_SIDE..][..ICON_SIDE];
+    for (pixel, &index) in out.chunks_exact_mut(4).zip(indices) {
+        let entry = ICON_HEADER + usize::from(index) * 4;
+        pixel.copy_from_slice(&icon[entry..entry + 4]);
     }
-    let index = ICON_PATHS.iter().position(|path| {
-        let fd = unsafe { nuttx_open(path.as_ptr(), O_RDONLY) };
-        if fd < 0 {
-            return false;
+}
+
+/// Whether the file at [`ICON_PATH`] already holds exactly this icon.
+fn icon_on_disk() -> bool {
+    let fd = unsafe { nuttx_open(ICON_PATH.as_ptr(), O_RDONLY) };
+    if fd < 0 {
+        return false;
+    }
+    let mut expected = [0u8; ICON_ROW];
+    let mut actual = [0u8; ICON_ROW];
+    let read = |buffer: &mut [u8]| unsafe {
+        nuttx_read(fd, buffer.as_mut_ptr().cast(), buffer.len() as u32)
+    };
+    let mut same = read(&mut actual[..ICON_HEADER]) == ICON_HEADER as i32
+        && actual[..ICON_HEADER] == ICON.bytes[..ICON_HEADER];
+    for y in 0..ICON_SIDE {
+        if !same {
+            break;
         }
-        unsafe { nuttx_close(fd) };
-        true
-    })?;
-    ICON_FOUND.store(index as u8 + 1, Ordering::Release);
-    Some(ICON_PATHS[index])
+        icon_row(y, &mut expected);
+        same = read(&mut actual) == ICON_ROW as i32 && actual == expected;
+    }
+    // Nothing may follow the image.
+    same = same && read(&mut actual[..1]) == 0;
+    unsafe { nuttx_close(fd) };
+    same
+}
+
+fn write_icon() -> bool {
+    unsafe { nuttx_unlink(ICON_TEMP_PATH.as_ptr()) };
+    let fd = unsafe { nuttx_create(ICON_TEMP_PATH.as_ptr(), O_WRONLY | O_CREAT, FILE_MODE) };
+    if fd < 0 {
+        return false;
+    }
+    let write = |buffer: &[u8]| unsafe {
+        nuttx_write(fd, buffer.as_ptr().cast(), buffer.len() as u32) == buffer.len() as i32
+    };
+    let mut row = [0u8; ICON_ROW];
+    let mut written = write(&ICON.bytes[..ICON_HEADER]);
+    for y in 0..ICON_SIDE {
+        if !written {
+            break;
+        }
+        icon_row(y, &mut row);
+        written = write(&row);
+    }
+    let closed = unsafe { nuttx_close(fd) } == 0;
+    if !written
+        || !closed
+        || unsafe { nuttx_rename(ICON_TEMP_PATH.as_ptr(), ICON_PATH.as_ptr()) } != 0
+    {
+        unsafe { nuttx_unlink(ICON_TEMP_PATH.as_ptr()) };
+        return false;
+    }
+    true
+}
+
+/// The NUL-terminated path of the headset artwork once it is on disk, writing
+/// it first when missing or different.
+pub fn icon_path() -> Option<&'static [u8]> {
+    if !ICON_READY.load(Ordering::Acquire) {
+        if !icon_on_disk() && !write_icon() {
+            return None;
+        }
+        ICON_READY.store(true, Ordering::Release);
+    }
+    Some(ICON_PATH)
 }
 
 static mut APP_DESCRIPTOR: core::mem::MaybeUninit<launcher_app_descriptor> =
@@ -102,7 +178,7 @@ fn app_descriptor_init() {
         let app = &mut *core::ptr::addr_of_mut!(APP_DESCRIPTOR).cast::<launcher_app_descriptor>();
         app.package_name = PACKAGE_NAME.as_ptr() as *mut core::ffi::c_void;
         app.launcher_icon_resource =
-            icon_path().unwrap_or(ICON_PATHS[0]).as_ptr() as *mut core::ffi::c_void;
+            icon_path().unwrap_or(ICON_PATH).as_ptr() as *mut core::ffi::c_void;
         app.app_id = APP_ID;
         app.launcher_metadata_callback =
             launcher_display_name as *const () as *mut core::ffi::c_void;

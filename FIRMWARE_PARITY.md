@@ -266,11 +266,14 @@ These do not replace firmware ordering or pairing behavior:
   after which only event 8 resumes it. The count appears on the diagnostics
   page (`TX queue … r<n>`), so a peer whose flow events never arrive is
   visible instead of silent.
-- The package ships the launcher artwork as an LVGL image resource, delivered
-  to `/data/canopus/m.bluetooth_audio/appicon_headphones.bin`; the launcher
-  entry and the in-app headline use it, falling back to the
-  `/data/canopus/appicon_headphones.bin` that the installer watchfaces stage.
-  Without either file the stock launcher omits the entry.
+- The stock launcher reads the icon by path as a 117x117 LVGL v9 ARGB8888
+  image and omits the app when the file is missing. The installer watchfaces
+  stage `/data/canopus/appicon_headphones.bin`; a package install does not, so
+  the module carries the icon as a 256-colour palette plus indices (15 KB,
+  `scripts/encode-icon-palette.py`) and, before publishing its launcher entry,
+  expands it into that file unless the file already matches. The in-app
+  headline uses the same file. The package declares no resources, so
+  Supervisors without resource staging can install it.
 - Short `&'static str` constants contribute their length words to the mergeable
   `.rodata.cst8` section, and a packed 4-byte group can alias the target XIP
   window (`0x0C000000..0x0C500000`): the verifier then reports it as an
