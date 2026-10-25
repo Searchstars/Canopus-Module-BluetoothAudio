@@ -16,11 +16,9 @@
 //! Loading while Bluetooth is OFF is valid. The adapter ON callback performs
 //! idempotent transport scheduling and GAP compatibility installation.
 //!
-//! Native app and Launcher registration are deliberately not part of module
-//! activation. `app_install` mutates miwear's process-local app/page registry;
-//! invoking it synchronously from an already-running Manager page re-enters
-//! that registry and is not rollback-safe when registration is rejected.
-//! Launcher publication must use a separate miwear bootstrap transaction.
+//! Native app registration runs on the serialized UI owner through the
+//! Supervisor's launcher service. The Supervisor installs the pages and adds
+//! the launcher entry before invoking the module's second publication stage.
 //!
 //! Only after the Bluetooth backend succeeds is the module marked RESIDENT.
 //! Once Bluetooth callbacks are published, unload is rejected and requires a
@@ -135,10 +133,11 @@ pub fn query_status() -> [u32; 20] {
         r.media_frames_sent.load(Ordering::Relaxed),
         r.media_packets_target.load(Ordering::Relaxed),
         r.sdp_registered.load(Ordering::Acquire),
-        r.app_state.load(Ordering::Acquire),
-        r.app_error.load(Ordering::Acquire) as u32,
-        r.app_install_result.load(Ordering::Acquire) as u32,
-        r.launcher_add_result.load(Ordering::Acquire) as u32,
+        r.app.id(),
+        r.app.error() as u32,
+        // Reserved slots formerly held direct firmware publication results.
+        0,
+        0,
     ]
 }
 

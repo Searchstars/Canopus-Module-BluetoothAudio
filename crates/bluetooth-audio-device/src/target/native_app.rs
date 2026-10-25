@@ -1,8 +1,8 @@
-//! Native app registration: fixed 8-bit app id, stock launcher entry, two page
-//! descriptors (overview + detail), and the page lifecycle callbacks. App/page
-//! registration and Launcher publication are intentionally separate invocations
-//! so miwear can process the app-registry event before Launcher persistence.
+//! Native page descriptors and lifecycle callbacks. The Supervisor owns app
+//! identity, firmware installation and launcher publication. Opening pages
+//! remains a launcher or in-app user action.
 
+use canopus_abi::{AppEntryV1, ContextV1};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use canopus_target_private::*;
@@ -10,13 +10,11 @@ use canopus_target_private::*;
 use super::runtime::*;
 use super::ui_backend;
 
-pub const APP_ID: u16 = 0x00CB;
 pub const PAGE_COUNT: usize = 3;
 pub const PAGE_OVERVIEW: usize = 0;
 pub const PAGE_DETAIL: usize = 1;
 pub const PAGE_DIAGNOSTICS: usize = 2;
 
-pub const PACKAGE_NAME: &[u8] = b"com.canopus.headphones\0";
 pub const DISPLAY_NAME: &[u8] = &[0xE8, 0x80, 0xB3, 0xE6, 0x9C, 0xBA, 0];
 /// The headset artwork, which is also the launcher icon: the stock launcher
 /// reads it by path as a 117x117 LVGL v9 ARGB8888 image and leaves the app out
@@ -128,15 +126,13 @@ pub fn icon_path() -> Option<&'static [u8]> {
     Some(ICON_PATH)
 }
 
-static mut APP_DESCRIPTOR: core::mem::MaybeUninit<launcher_app_descriptor> =
-    core::mem::MaybeUninit::uninit();
 static mut PAGE_DESCRIPTORS: core::mem::MaybeUninit<[firmware_page_descriptor; PAGE_COUNT]> =
     core::mem::MaybeUninit::uninit();
 
 pub fn page_descriptor_ptr(index: usize) -> *mut firmware_page_descriptor {
-    // SAFETY: PAGE_DESCRIPTORS is initialized by `install` before any page
-    // lifecycle callback can run; the firmware only reads these descriptors
-    // after install returns. `addr_of_mut!` avoids the `static_mut_refs` deny
+    // SAFETY: PAGE_DESCRIPTORS is initialized by `install_stage` before any page
+    // lifecycle callback can run; the Supervisor retains these descriptors
+    // until reboot. `addr_of_mut!` avoids the `static_mut_refs` deny
     // lint; the caller uses raw pointer writes.
     unsafe {
         core::ptr::addr_of_mut!(PAGE_DESCRIPTORS)
@@ -145,50 +141,10 @@ pub fn page_descriptor_ptr(index: usize) -> *mut firmware_page_descriptor {
     }
 }
 
-extern "C" fn launcher_display_name() -> *const u8 {
-    DISPLAY_NAME.as_ptr()
-}
-
-fn c_str_equal(a: *const u8, expected: &[u8]) -> bool {
-    if a.is_null() || expected.last() != Some(&0) {
-        return false;
-    }
-    let mut i = 0usize;
-    while i < expected.len() {
-        if unsafe { *a.add(i) } != expected[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-fn app_descriptor_init() {
-    // SAFETY: APP_DESCRIPTOR is a module-private static initialized exactly
-    // once here, before `app_install` publishes it to the firmware.
-    unsafe {
-        core::ptr::write_bytes(
-            core::ptr::addr_of_mut!(APP_DESCRIPTOR).cast::<u8>(),
-            0,
-            core::mem::size_of::<launcher_app_descriptor>(),
-        );
-    }
-    // SAFETY: writes through the freshly zeroed static.
-    unsafe {
-        let app = &mut *core::ptr::addr_of_mut!(APP_DESCRIPTOR).cast::<launcher_app_descriptor>();
-        app.package_name = PACKAGE_NAME.as_ptr() as *mut core::ffi::c_void;
-        app.launcher_icon_resource =
-            icon_path().unwrap_or(ICON_PATH).as_ptr() as *mut core::ffi::c_void;
-        app.app_id = APP_ID;
-        app.launcher_metadata_callback =
-            launcher_display_name as *const () as *mut core::ffi::c_void;
-    }
-}
-
 fn descriptor_init(index: usize, name: &[u8], page_id: u16) {
     let descriptor = page_descriptor_ptr(index);
     // SAFETY: descriptor points at a zero-valid region of the static array;
-    // the firmware does not inspect it until `app_install` is called. Cast to
+    // the firmware does not inspect it until the Supervisor publishes it. Cast to
     // bytes because `write_bytes` counts elements, not bytes.
     unsafe {
         core::ptr::write_bytes(
@@ -198,7 +154,7 @@ fn descriptor_init(index: usize, name: &[u8], page_id: u16) {
         );
         (*descriptor).page_name = name.as_ptr() as *mut core::ffi::c_void;
         (*descriptor).page_id = page_id;
-        (*descriptor).app_id = APP_ID;
+        // Supervisor writes app_id with the allocated identity during publication.
         (*descriptor).on_signal = page_on_signal as *const () as *mut core::ffi::c_void;
         (*descriptor).on_create = page_on_create as *const () as *mut core::ffi::c_void;
         (*descriptor).on_resume = page_on_resume as *const () as *mut core::ffi::c_void;
@@ -222,30 +178,19 @@ fn descriptor_init(index: usize, name: &[u8], page_id: u16) {
     }
 }
 
-/// Executes one native-app publication stage. Stage 1 registers the app and
-/// pages, while stage 2 adds its Launcher entry after miwear has processed the
-/// app-registry event.
-pub fn install_stage(stage: u32) -> Result<(), i32> {
-    let r = runtime();
-    let existing = unsafe { app_lookup(APP_ID) };
-
+/// Queues native pages at stage 1 and confirms registration at stage 2.
+/// Supervisor defers stage 2 until app installation and launcher publication
+/// succeed. Publication does not open the app.
+///
+/// # Safety
+/// `ctx` must be the live context supplied on the serialized module/UI owner.
+pub unsafe fn install_stage(ctx: *const ContextV1, stage: u32) -> Result<(), i32> {
+    let registration = &runtime().app;
     if stage == 1 {
-        if !existing.is_null() {
-            // Read the package field using the exact target descriptor layout.
-            let package: *const u8 = unsafe {
-                core::ptr::read(existing.cast::<u8>().add(APP_PACKAGE_OFFSET) as *const *const u8)
-            };
-            if !c_str_equal(package, PACKAGE_NAME) {
-                r.app_error.store(-101, Ordering::Release);
-                r.app_state.store(APP_FAILED, Ordering::Release);
-                return Err(-101);
-            }
-            r.app_state.store(APP_REGISTERED, Ordering::Release);
-            r.app_error.store(0, Ordering::Release);
+        // Keep descriptors already retained by the Supervisor intact.
+        if registration.id() != 0 {
             return Ok(());
         }
-
-        app_descriptor_init();
         descriptor_init(PAGE_OVERVIEW, PAGE_NAME_OVERVIEW, PAGE_OVERVIEW as u16);
         descriptor_init(PAGE_DETAIL, PAGE_NAME_DETAIL, PAGE_DETAIL as u16);
         descriptor_init(
@@ -253,72 +198,27 @@ pub fn install_stage(stage: u32) -> Result<(), i32> {
             PAGE_NAME_DIAGNOSTICS,
             PAGE_DIAGNOSTICS as u16,
         );
-
-        // SAFETY: descriptors are zeroed and fully initialized above; app_install
-        // consumes the local pointer array synchronously and retains the descriptors.
-        let pages: [*mut firmware_page_descriptor; PAGE_COUNT] = [
-            page_descriptor_ptr(PAGE_OVERVIEW),
-            page_descriptor_ptr(PAGE_DETAIL),
-            page_descriptor_ptr(PAGE_DIAGNOSTICS),
+        let pages = [
+            page_descriptor_ptr(PAGE_OVERVIEW).cast(),
+            page_descriptor_ptr(PAGE_DETAIL).cast(),
+            page_descriptor_ptr(PAGE_DIAGNOSTICS).cast(),
         ];
-        let install_result = unsafe {
-            app_install(
-                core::ptr::addr_of_mut!(APP_DESCRIPTOR).cast::<launcher_app_descriptor>(),
-                pages.as_ptr(),
-                PAGE_COUNT as u32,
-            )
+        let entry = AppEntryV1 {
+            struct_size: core::mem::size_of::<AppEntryV1>() as u32,
+            label: DISPLAY_NAME.as_ptr().cast(),
+            icon: icon_path().unwrap_or(ICON_PATH).as_ptr().cast(),
+            pages: pages.as_ptr(),
+            page_count: PAGE_COUNT as u32,
         };
-        r.app_install_result
-            .store(install_result, Ordering::Release);
-        let installed = unsafe { app_lookup(APP_ID) };
-        if installed.is_null() {
-            r.app_error.store(-100, Ordering::Release);
-            r.app_state.store(APP_FAILED, Ordering::Release);
-            return Err(-100);
-        }
-        let package: *const u8 = unsafe {
-            core::ptr::read(installed.cast::<u8>().add(APP_PACKAGE_OFFSET) as *const *const u8)
-        };
-        if !c_str_equal(package, PACKAGE_NAME) {
-            r.app_error.store(-101, Ordering::Release);
-            r.app_state.store(APP_FAILED, Ordering::Release);
-            return Err(-101);
-        }
-        r.app_state.store(APP_REGISTERED, Ordering::Release);
-        r.app_error.store(0, Ordering::Release);
-        return Ok(());
+        // The Supervisor copies this stack array; descriptors and callbacks remain
+        // in module-owned storage until reboot.
+        return unsafe { registration.register(ctx, &entry) };
     }
-
     if stage == 2 {
-        if existing.is_null() {
-            r.app_error.store(-102, Ordering::Release);
-            r.app_state.store(APP_FAILED, Ordering::Release);
-            return Err(-102);
-        }
-        let package: *const u8 = unsafe {
-            core::ptr::read(existing.cast::<u8>().add(APP_PACKAGE_OFFSET) as *const *const u8)
-        };
-        if !c_str_equal(package, PACKAGE_NAME) {
-            r.app_error.store(-101, Ordering::Release);
-            r.app_state.store(APP_FAILED, Ordering::Release);
-            return Err(-101);
-        }
-        if r.app_state.load(Ordering::Acquire) == APP_OK {
-            return Ok(());
-        }
-        // `app_launcher_add` returns an implementation-defined launcher
-        // bookkeeping result, not a zero-on-success status. The installed app
-        // lookup above is the validity gate; retain the raw result for status
-        // diagnostics and treat publication as complete once the call returns.
-        let launcher_result = unsafe { launcher_add(APP_ID) };
-        r.launcher_add_result
-            .store(launcher_result, Ordering::Release);
-        r.app_state.store(APP_OK, Ordering::Release);
-        r.app_error.store(0, Ordering::Release);
+        registration.page_key(PAGE_OVERVIEW).ok_or(-16)?;
         return Ok(());
     }
-
-    Err(-103)
+    Err(-22)
 }
 
 // ---------------------------------------------------------------------------

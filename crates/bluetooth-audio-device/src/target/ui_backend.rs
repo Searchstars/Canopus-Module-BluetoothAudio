@@ -9,7 +9,8 @@
 use canopus_target_private::*;
 use canopus_ui_core::{ColorRole, ComponentVariant, NodeKind, Snapshot, TextStyle};
 
-use super::native_app::{self, APP_ID, PAGE_COUNT, PAGE_OVERVIEW, page_descriptor_ptr};
+use super::native_app::{self, PAGE_COUNT, PAGE_OVERVIEW, page_descriptor_ptr};
+use super::runtime::runtime;
 
 static EMPTY_TEXT: [u8; 1] = [0];
 const REFRESH_PERIOD_MS: u32 = 250;
@@ -316,8 +317,12 @@ pub fn page_destroy(page_index: usize) -> i32 {
 // ---------------------------------------------------------------------------
 
 pub fn navigate(page_index: usize) {
-    let key = ((APP_ID as u32) << 16) | page_index as u32;
-    unsafe { activity_navigate(key, 0, 0, 0) };
+    if page_index >= PAGE_COUNT {
+        return;
+    }
+    if let Some(key) = runtime().app.page_key(page_index) {
+        unsafe { activity_navigate(key, 0, 0, 0) };
+    }
 }
 
 pub fn back(page_index: usize) {

@@ -97,11 +97,6 @@ pub const ERRNO_EBUSY: i32 = -16;
 pub const ERRNO_EINVAL: i32 = -22;
 pub const ERRNO_ENOSYS: i32 = -38;
 
-pub const APP_NONE: u32 = 0;
-pub const APP_REGISTERED: u32 = 1;
-pub const APP_OK: u32 = 2;
-pub const APP_FAILED: u32 = 3;
-
 pub struct Core {
     pub controller: Controller<DevicePlatform>,
     pub source: avdtp::Source,
@@ -210,10 +205,7 @@ pub struct Runtime {
     pub avrcp_sdp_handle: AtomicU32,
     pub sdp_registered: AtomicU32,
     // Native app / lifecycle.
-    pub app_state: AtomicU32,
-    pub app_error: AtomicI32,
-    pub app_install_result: AtomicI32,
-    pub launcher_add_result: AtomicI32,
+    pub app: crate::app_registration::AppRegistration,
     pub core_filter_table: AtomicUsize,
     pub core_filter_handle: AtomicU32,
     pub resident: AtomicBool,
@@ -291,10 +283,7 @@ impl Runtime {
             sdp_handle: AtomicU32::new(0),
             avrcp_sdp_handle: AtomicU32::new(0),
             sdp_registered: AtomicU32::new(0),
-            app_state: AtomicU32::new(APP_NONE),
-            app_error: AtomicI32::new(0),
-            app_install_result: AtomicI32::new(0),
-            launcher_add_result: AtomicI32::new(0),
+            app: crate::app_registration::AppRegistration::new(),
             core_filter_table: AtomicUsize::new(0),
             core_filter_handle: AtomicU32::new(0),
             resident: AtomicBool::new(false),
