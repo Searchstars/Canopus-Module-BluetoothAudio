@@ -1,12 +1,23 @@
-use crate::{Address, ConnectionState, DiscoveredDevice, Model, Peer, ScanState};
+use crate::{Address, BondState, ConnectionState, DiscoveredDevice, Model, Peer, ScanState};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BondPreparation {
+    Bonded,
+    Pair,
+    Removing,
+}
 
 pub trait Platform {
     type Error;
     fn start_discovery(&mut self, timeout_seconds: u8) -> Result<(), Self::Error>;
     fn stop_discovery(&mut self) -> Result<(), Self::Error>;
-    /// Queries both target bond records and removes any local Classic record.
-    /// Returns `true` when pairing must wait for a removal callback.
-    fn prepare_bond(&mut self, address: Address) -> Result<bool, Self::Error>;
+    /// Reuses a retained Classic bond, unless the user explicitly requests pairing again.
+    /// Removal must finish before a fresh pairing transaction can start.
+    fn prepare_bond(
+        &mut self,
+        address: Address,
+        force_pair: bool,
+    ) -> Result<BondPreparation, Self::Error>;
     fn create_bond(&mut self, address: Address) -> Result<(), Self::Error>;
     fn connect_avdtp(&mut self, address: Address) -> Result<(), Self::Error>;
     fn disconnect_avdtp(&mut self, address: Address) -> Result<(), Self::Error>;
@@ -16,6 +27,7 @@ pub trait Platform {
 pub struct Controller<P> {
     pub model: Model,
     platform: P,
+    force_pair: bool,
 }
 
 impl<P: Platform> Controller<P> {
@@ -23,6 +35,7 @@ impl<P: Platform> Controller<P> {
         Self {
             model: Model::default(),
             platform,
+            force_pair: false,
         }
     }
     pub fn platform(&self) -> &P {
@@ -92,6 +105,33 @@ impl<P: Platform> Controller<P> {
             class_of_device: device.class_of_device,
             bond: Default::default(),
         };
+        self.select_peer(peer, false)
+    }
+
+    pub fn reconnect(&mut self) -> Result<(), P::Error> {
+        let Some(peer) = self.model.remembered else {
+            return Ok(());
+        };
+        self.select_peer(peer, false)
+    }
+
+    pub fn pair_again(&mut self) -> Result<(), P::Error> {
+        let Some(peer) = self.model.selected.or(self.model.remembered) else {
+            return Ok(());
+        };
+        self.select_peer(peer, true)
+    }
+
+    fn select_peer(&mut self, peer: Peer, force_pair: bool) -> Result<(), P::Error> {
+        if self.model.connected.is_some()
+            || !matches!(
+                self.model.connection,
+                ConnectionState::Disconnected | ConnectionState::Failed
+            )
+        {
+            return Ok(());
+        }
+        self.force_pair = force_pair;
         self.model.selected = Some(peer);
         self.model.last_error = 0;
         if matches!(self.model.scan, ScanState::Scanning | ScanState::Starting) {
@@ -120,14 +160,14 @@ impl<P: Platform> Controller<P> {
         self.model.connection = ConnectionState::CheckingBond;
         self.model.touch();
 
-        // The exact target cannot safely infer that a retained local record is
-        // usable by the remote peer. Always query and remove it, then begin a
-        // fresh stock Classic bond. The NONE callback is the removal commit.
-        self.model.connection = ConnectionState::RemovingBond;
-        self.model.touch();
-        match self.platform.prepare_bond(address) {
-            Ok(true) => Ok(()),
-            Ok(false) => self.begin_pair(address),
+        match self.platform.prepare_bond(address, self.force_pair) {
+            Ok(BondPreparation::Bonded) => self.begin_connect(address),
+            Ok(BondPreparation::Removing) => {
+                self.model.connection = ConnectionState::RemovingBond;
+                self.model.touch();
+                Ok(())
+            }
+            Ok(BondPreparation::Pair) => self.begin_pair(address),
             Err(error) => {
                 self.model.connection = ConnectionState::Failed;
                 self.model.touch();
@@ -174,6 +214,14 @@ impl<P: Platform> Controller<P> {
             self.model.touch();
             return Ok(());
         }
+        if let Some(peer) = &mut self.model.selected {
+            peer.bond = BondState::Bonded;
+            self.model.remembered = Some(*peer);
+        }
+        self.begin_connect(address)
+    }
+
+    fn begin_connect(&mut self, address: Address) -> Result<(), P::Error> {
         self.model.connection = ConnectionState::Connecting;
         self.model.touch();
         match self.platform.connect_avdtp(address) {
@@ -191,6 +239,10 @@ impl<P: Platform> Controller<P> {
             return;
         }
         self.model.connected = self.model.selected;
+        if let Some(peer) = &mut self.model.connected {
+            peer.bond = BondState::Bonded;
+            self.model.remembered = Some(*peer);
+        }
         self.model.connection = ConnectionState::Configuring;
         self.model.touch();
     }

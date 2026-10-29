@@ -55,6 +55,26 @@ fn overview_invites_pairing_when_nothing_is_connected() {
 }
 
 #[test]
+fn remembered_headset_has_a_reconnect_action_after_restart() {
+    let mut model = Model {
+        remembered: connected(b"AirPods Pro").connected,
+        ..Model::default()
+    };
+    let snapshot = ui::overview(&model).unwrap();
+    assert_eq!(text(&snapshot, key::HEADLINE), "AirPods Pro");
+    let reconnect = snapshot.find_by_key(key::RECONNECT).unwrap();
+    assert!(reconnect.enabled());
+    assert_eq!(reconnect.event_id, ui::EVENT_RECONNECT);
+    model.selected = model.remembered;
+    model.connection = ConnectionState::Failed;
+    let failed = ui::overview(&model).unwrap();
+    assert_eq!(
+        failed.find_by_key(key::PAIR_AGAIN).unwrap().event_id,
+        ui::EVENT_PAIR_AGAIN
+    );
+}
+
+#[test]
 fn overview_shows_a_connected_headset_with_its_detail_row() {
     let snapshot = ui::overview(&connected(b"AirPods Pro")).unwrap();
     assert_eq!(text(&snapshot, key::HEADLINE), "AirPods Pro");

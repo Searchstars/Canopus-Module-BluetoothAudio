@@ -205,7 +205,7 @@ A Bluetooth-owner pump performs bounded work:
 6. duplicate mono to stereo;
 7. feed exactly 128 PCM samples per channel into the SBC encoder;
 8. aggregate negotiated SBC frames into RTP packets up to the media MTU;
-9. pace packets on the existing Bluetooth timer against one anchor on the monotonic clock: packets a stalled owner thread could not send are sent back to back once it runs again (a stall longer than 400 ms is written off), and PAUSE/STOP generations are respected.
+9. pace packets on the existing Bluetooth timer against one anchor on the monotonic clock: keep 80 ms of music ahead (plus at most one packet of rounding), replenish that bounded runway after short owner stalls, and write off stalls longer than 400 ms. PAUSE/STOP generations are respected. The lead does not enlarge the compressed-input ring or bypass media flow control; pacing diagnostics still measure lateness against real time, not against the lead target.
 
 The pump has a per-callback decode/frame budget so one application cannot monopolize the Bluetooth owner thread. If more work remains, it requeues itself.
 

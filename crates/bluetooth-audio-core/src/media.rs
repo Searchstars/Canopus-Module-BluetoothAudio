@@ -142,6 +142,7 @@ pub enum Pace {
 pub struct PacketClock {
     anchor_ms: u32,
     sent_samples: u64,
+    lead_ms: u32,
     running: bool,
     /// Largest debt seen since the last [`Self::take_worst_lag_ms`], for diagnostics.
     worst_lag_ms: u32,
@@ -151,9 +152,17 @@ impl PacketClock {
     pub const CATCH_UP_LIMIT_MS: u32 = 400;
 
     pub const fn new() -> Self {
+        Self::with_lead(0)
+    }
+
+    /// Keeps `lead_ms` of music ahead of real time, in addition to at most one packet of rounding.
+    /// Catch-up alone only repairs a stall after it happened; this runway lets the sink play
+    /// through short owner-thread stalls without relying on the initial silence still being there.
+    pub const fn with_lead(lead_ms: u32) -> Self {
         Self {
             anchor_ms: 0,
             sent_samples: 0,
+            lead_ms,
             running: false,
             worst_lag_ms: 0,
         }
@@ -174,10 +183,11 @@ impl PacketClock {
         }
         let elapsed_us = u64::from(now_ms.wrapping_sub(self.anchor_ms)) * 1_000;
         let sent_us = self.sent_samples * 1_000_000 / u64::from(SAMPLE_RATE);
-        if sent_us > elapsed_us {
-            return Pace::Wait(((sent_us - elapsed_us).div_ceil(1_000)).max(1) as u32);
+        let target_us = elapsed_us + u64::from(self.lead_ms) * 1_000;
+        if sent_us > target_us {
+            return Pace::Wait(((sent_us - target_us).div_ceil(1_000)).max(1) as u32);
         }
-        let lag_ms = ((elapsed_us - sent_us) / 1_000).min(u64::from(u32::MAX)) as u32;
+        let lag_ms = (elapsed_us.saturating_sub(sent_us) / 1_000).min(u64::from(u32::MAX)) as u32;
         self.worst_lag_ms = self.worst_lag_ms.max(lag_ms);
         if lag_ms > Self::CATCH_UP_LIMIT_MS {
             self.anchor_ms = now_ms;

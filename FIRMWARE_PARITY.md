@@ -13,7 +13,7 @@ build target; active module builds are 3.101.036 and 3.101.043.
 | Stop discovery | `0x0C398D8D(adapter)`; wait for STOPPED callback | `stop_discovery` then `CORE_EVENT_DISCOVERY_STOPPED` |
 | Aggregate bond query | `0x0C39F371(address)` | `query_bond` |
 | Exact Classic record query | `0x0C39F9B1(address, 1)` | `query_bond` |
-| Remove retained Classic record | `0x0C3A028D(address, 1)` | `prepare_fresh_bond` |
+| Remove retained Classic record on explicit re-pair | `0x0C3A028D(address, 1)` | `prepare_target_bond` |
 | Removal commit | matching bond callback `(transport=1, state=0)` | `CORE_EVENT_REMOVE_OK` |
 | Make adapter bondable | `set_scan_mode(current_mode, 1)` | `submit_bond` |
 | Install transaction Pair Request filter | mirror 16 callbacks; replace slot 5 only | `install_core_pair_filter` |
@@ -340,8 +340,16 @@ path is considered device-verified, a run must observe in order:
 13. a second complete fresh-pair run without a stale callback changing the new
     session.
 
-A retained-bond fast reconnect option is intentionally absent until repeated
-true-device runs demonstrate at least 95% reliability across supported peers.
+Retained-bond reconnect now queries the exact Classic state and goes directly
+to AVDTP when it is BONDED (2). The aggregate presence bit alone never permits
+this shortcut. The last successful peer's name, address and class are saved in
+`/data/canopus_btaudio_peer.bin` with a checksum and temporary-file rename, so
+the overview can reconnect without inquiry after reboot. Keys stay in the
+firmware bond store. A failed reconnect preserves the keys; the explicit
+"重新配对" action uses the existing removal/NONE/fresh-pair transaction.
+Host tests cover retained reconnect, scan-stop ordering, explicit re-pair and
+stale callbacks. Repeated physical headset runs remain necessary to measure
+reconnect reliability; this change does not claim new radio validation.
 
 ## REDMI Buds 8 Pro validation status
 

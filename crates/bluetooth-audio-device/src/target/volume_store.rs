@@ -48,6 +48,17 @@ fn read_file(out: &mut [u8; FILE_SIZE]) -> bool {
     stored == checksum(&out[..FILE_SIZE - 4])
 }
 
+/// Older module versions already kept the most recently used address here.
+/// Restore a reconnect target on upgrade before the new peer file exists.
+pub fn last_address() -> Option<[u8; 6]> {
+    let mut file = [0u8; FILE_SIZE];
+    if !read_file(&mut file) || file[5] == 0 || file[HEADER_SIZE + 6] > 0x7f {
+        return None;
+    }
+    let address: [u8; 6] = file[HEADER_SIZE..HEADER_SIZE + 6].try_into().ok()?;
+    (address != [0; 6]).then_some(address)
+}
+
 pub fn select(address: [u8; 6], fallback: u8) -> u8 {
     let volume = load(address).unwrap_or(fallback.min(0x7f));
     unsafe {

@@ -46,6 +46,9 @@ const DECODE_ONLY_STEP_DELAY_MS: u32 = 1;
 /// (`MAX_MEDIA_TX_OUTSTANDING`) usually stops a catch-up sooner; this bounds the decode and
 /// encode work one callback does on the Bluetooth owner thread.
 const MAX_PACKETS_PER_PUMP: usize = 3;
+/// A small, bounded runway of actual music in the sink. Startup silence can already have played
+/// out while the stream was being prepared; a just-in-time music pacer has no margin after that.
+const MUSIC_LEAD_MS: u32 = 80;
 const MAX_DECODED_PCM_FRAMES: usize = 1152;
 const PCM_FRAME_CAPACITY: usize =
     MAX_DECODED_PCM_FRAMES + MAX_FRAMES_PER_PACKET as usize * FRAME_SAMPLES as usize - 1;
@@ -204,7 +207,7 @@ fn allocate_pipeline() -> Result<(&'static mut Pipeline, bool), i32> {
         core::ptr::addr_of_mut!((*allocation).packetizer_ready).write(false);
         core::ptr::addr_of_mut!((*allocation).session_generation).write(0);
         core::ptr::addr_of_mut!((*allocation).marker).write(true);
-        core::ptr::addr_of_mut!((*allocation).clock).write(PacketClock::new());
+        core::ptr::addr_of_mut!((*allocation).clock).write(PacketClock::with_lead(MUSIC_LEAD_MS));
         core::ptr::addr_of_mut!((*allocation).startup_packets_remaining).write(0);
         core::ptr::addr_of_mut!((*allocation).startup_complete).write(false);
     }

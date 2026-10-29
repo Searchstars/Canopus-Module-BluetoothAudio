@@ -135,6 +135,8 @@ pub struct Model {
     pub devices: DiscoveryTable,
     pub selected: Option<Peer>,
     pub connected: Option<Peer>,
+    /// Last successfully paired headset, retained across disconnects and restored at startup.
+    pub remembered: Option<Peer>,
     pub details: LinkDetails,
     pub last_error: i32,
 }
@@ -149,6 +151,7 @@ impl Default for Model {
             devices: DiscoveryTable::default(),
             selected: None,
             connected: None,
+            remembered: None,
             details: LinkDetails::default(),
             last_error: 0,
         }

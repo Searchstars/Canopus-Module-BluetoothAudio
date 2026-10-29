@@ -24,6 +24,8 @@ pub const EVENT_TEST_TONE: u32 = 6;
 pub const EVENT_LONG_MP3: u32 = 7;
 pub const EVENT_LONG_MP3_DECODE_ONLY: u32 = 8;
 pub const EVENT_DIAGNOSTICS: u32 = 9;
+pub const EVENT_RECONNECT: u32 = 10;
+pub const EVENT_PAIR_AGAIN: u32 = 11;
 pub const EVENT_DEVICE_BASE: u32 = 100;
 
 /// Node keys the device backend dispatches on.
@@ -35,6 +37,8 @@ pub mod key {
     pub const SUMMARY: u32 = 4;
     pub const DETAIL: u32 = 5;
     pub const SCAN: u32 = 21;
+    pub const RECONNECT: u32 = 23;
+    pub const PAIR_AGAIN: u32 = 24;
     pub const TEST_TONE: u32 = 34;
     pub const LONG_MP3: u32 = 35;
     pub const DISCONNECT: u32 = 36;
@@ -86,12 +90,18 @@ pub fn status(model: &Model) -> Status {
     };
     let stream_failed = model.stream == StreamState::Failed;
     match model.connection {
-        ConnectionState::Disconnected => plain("未连接", ColorRole::TextSecondary, ""),
+        ConnectionState::Disconnected => plain(
+            "未连接",
+            ColorRole::TextSecondary,
+            if model.remembered.is_some() {
+                "耳机开机后可直接连接"
+            } else {
+                ""
+            },
+        ),
         ConnectionState::WaitingForScanStop
         | ConnectionState::CheckingBond
-        | ConnectionState::RemovingBond => {
-            plain("正在准备", ColorRole::Accent, "请让耳机保持配对模式")
-        }
+        | ConnectionState::RemovingBond => plain("正在准备", ColorRole::Accent, "请让耳机保持开机"),
         ConnectionState::Pairing => {
             plain("正在配对", ColorRole::Accent, "如有提示，请在耳机上确认")
         }
@@ -123,11 +133,11 @@ fn failure(error: i32) -> Status {
     let hint = match error {
         ERR_CODEC_UNSUPPORTED => "耳机不支持 SBC 音频格式",
         ERR_BOND_TIMEOUT => "配对超时，请让耳机重新进入配对模式",
-        ERR_REMOTE => "耳机拒绝了连接，请重新进入配对模式",
+        ERR_REMOTE => "耳机拒绝了连接，请重试或重新配对",
         ERR_ADAPTER_UNAVAILABLE => "请先在手环设置里打开蓝牙",
         ERR_STATE | ERRNO_EBUSY => "蓝牙正忙，请稍后再试",
         ERR_HCI_POLICY => "当前固件暂不支持连接耳机",
-        _ => "请让耳机重新进入配对模式后重试",
+        _ => "请确认耳机开机，再重试或重新配对",
     };
     Status {
         label: "连接失败",
@@ -140,7 +150,12 @@ fn failure(error: i32) -> Status {
 pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
     let mut tree = Tree::begin();
     tree.navigation_page(key::PAGE, "耳机")?;
-    let name = match model.connected.as_ref().or(model.selected.as_ref()) {
+    let name = match model
+        .connected
+        .as_ref()
+        .or(model.selected.as_ref())
+        .or(model.remembered.as_ref())
+    {
         Some(peer) => display_name(&peer.name),
         None => "未连接耳机",
     };
@@ -153,6 +168,21 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
             EVENT_CONNECTED_DETAIL,
             true,
         )?;
+    }
+
+    let idle = matches!(
+        model.connection,
+        ConnectionState::Disconnected | ConnectionState::Failed
+    );
+    if model.connected.is_none() && model.remembered.is_some() {
+        tree.button(key::RECONNECT, "连接上次耳机", EVENT_RECONNECT, idle)?;
+        tree.set_style(key::RECONNECT, variant(ComponentVariant::Filled))?;
+    }
+    if model.connected.is_none()
+        && model.connection == ConnectionState::Failed
+        && model.selected.is_some()
+    {
+        tree.button(key::PAIR_AGAIN, "重新配对", EVENT_PAIR_AGAIN, true)?;
     }
 
     tree.section(20, "连接新耳机")?;
@@ -208,6 +238,7 @@ pub fn overview(model: &Model) -> Result<Snapshot, UiError> {
         ScanState::Starting | ScanState::Scanning if !found => "正在搜索附近的耳机…",
         ScanState::Failed => "搜索没能开始，请稍后再试",
         _ if found => "点按耳机即可连接",
+        _ if model.remembered.is_some() => "新耳机首次连接需要进入配对模式",
         _ => "请先让耳机进入配对模式",
     };
     if !note.is_empty() {

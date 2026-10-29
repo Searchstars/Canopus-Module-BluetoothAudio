@@ -1,5 +1,5 @@
 use canopus_bluetooth_audio_core::{
-    Address, ConnectionState, Controller, DiscoveredDevice, Peer, Platform,
+    Address, BondPreparation, ConnectionState, Controller, DiscoveredDevice, Peer, Platform,
 };
 
 #[derive(Default)]
@@ -7,6 +7,7 @@ struct Fake {
     calls: [u8; 8],
     len: usize,
     removal_pending: bool,
+    bonded: bool,
     fail_disconnect: bool,
 }
 impl Fake {
@@ -25,9 +26,19 @@ impl Platform for Fake {
         self.push(2);
         Ok(())
     }
-    fn prepare_bond(&mut self, _: Address) -> Result<bool, Self::Error> {
+    fn prepare_bond(
+        &mut self,
+        _: Address,
+        force_pair: bool,
+    ) -> Result<BondPreparation, Self::Error> {
         self.push(3);
-        Ok(self.removal_pending)
+        Ok(if self.bonded && !force_pair {
+            BondPreparation::Bonded
+        } else if self.removal_pending {
+            BondPreparation::Removing
+        } else {
+            BondPreparation::Pair
+        })
     }
     fn create_bond(&mut self, _: Address) -> Result<(), Self::Error> {
         self.push(4);
@@ -74,14 +85,19 @@ fn selection_stops_scan_before_pairing() {
 }
 
 #[test]
-fn retained_bond_waits_for_removal_before_fresh_pair() {
+fn explicit_pair_again_waits_for_removal_before_fresh_pair() {
     let mut c = Controller::new(Fake {
         removal_pending: true,
+        bonded: true,
         ..Default::default()
     });
     c.model.devices.begin_scan();
     c.discovery_result(result());
-    c.select(0).unwrap();
+    c.model.remembered = Some(Peer {
+        address: result().address,
+        ..Peer::default()
+    });
+    c.pair_again().unwrap();
     assert_eq!(c.model.connection, ConnectionState::RemovingBond);
     assert_eq!(&c.platform().calls[..1], &[3]);
     c.bond_removed(result().address, true).unwrap();
@@ -89,6 +105,48 @@ fn retained_bond_waits_for_removal_before_fresh_pair() {
     assert_eq!(&c.platform().calls[..2], &[3, 4]);
     c.bond_complete(result().address, true).unwrap();
     assert_eq!(&c.platform().calls[..3], &[3, 4, 5]);
+}
+
+#[test]
+fn retained_bond_reconnects_without_discovery_removal_or_pairing() {
+    let mut c = Controller::new(Fake {
+        removal_pending: true,
+        bonded: true,
+        ..Default::default()
+    });
+    let peer = Peer {
+        address: result().address,
+        ..Peer::default()
+    };
+    c.model.remembered = Some(peer);
+    c.reconnect().unwrap();
+    assert_eq!(c.model.connection, ConnectionState::Connecting);
+    assert_eq!(&c.platform().calls[..c.platform().len], &[3, 5]);
+    // Old pairing/removal callbacks cannot turn this into a fresh-pair transaction.
+    c.bond_removed(peer.address, true).unwrap();
+    c.bond_complete(peer.address, false).unwrap();
+    assert_eq!(c.model.connection, ConnectionState::Connecting);
+    c.connected(peer.address);
+    c.stream_ready();
+    c.disconnected(peer.address);
+    assert_eq!(c.model.remembered.unwrap().address, peer.address);
+    c.reconnect().unwrap();
+    assert_eq!(&c.platform().calls[..c.platform().len], &[3, 5, 3, 5]);
+}
+
+#[test]
+fn scanning_selection_also_reuses_a_retained_bond() {
+    let mut c = Controller::new(Fake {
+        bonded: true,
+        ..Default::default()
+    });
+    c.start_scan().unwrap();
+    c.discovery_result(result());
+    c.select(0).unwrap();
+    assert_eq!(&c.platform().calls[..c.platform().len], &[1, 2]);
+    c.discovery_stopped().unwrap();
+    assert_eq!(c.model.connection, ConnectionState::Connecting);
+    assert_eq!(&c.platform().calls[..c.platform().len], &[1, 2, 3, 5]);
 }
 
 #[test]
@@ -104,10 +162,11 @@ fn disconnect_failure_restores_ready_state() {
     c.model.selected = Some(peer);
     c.connected(peer.address);
     c.stream_ready();
+    let connected = c.model.connected;
 
     assert!(c.disconnect().is_err());
     assert_eq!(c.model.connection, ConnectionState::Ready);
-    assert_eq!(c.model.connected, Some(peer));
+    assert_eq!(c.model.connected, connected);
     assert_eq!(&c.platform().calls[..1], &[6]);
 }
 

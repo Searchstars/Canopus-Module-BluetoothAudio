@@ -48,6 +48,7 @@ pub mod audio_stream;
 pub mod bluetooth;
 pub mod compatibility;
 pub mod native_app;
+pub mod peer_store;
 pub mod runtime;
 pub mod sbc_encoder;
 pub mod transport;
@@ -76,6 +77,14 @@ pub fn activate() -> i32 {
         runtime().last_error.store(ERR_STATE, Ordering::Release);
         return guard;
     }
+    let remembered = peer_store::load().or_else(|| {
+        Some(canopus_bluetooth_audio_core::Peer {
+            address: canopus_bluetooth_audio_core::Address(volume_store::last_address()?),
+            name: canopus_bluetooth_audio_core::DeviceName::from_bytes("上次的耳机".as_bytes()),
+            ..Default::default()
+        })
+    });
+    with_core(|core| core.controller.model.remembered = remembered);
     if let Err(error) = bluetooth::register() {
         runtime().last_error.store(error, Ordering::Release);
         return error;
@@ -146,7 +155,7 @@ pub fn query_status() -> [u32; 20] {
 /// core lock on the page owner thread; Bluetooth callbacks only publish atomics.
 fn sync_target_model(core: &mut Core) {
     let r = runtime();
-    if !volume_store::flush_pending() {
+    if !peer_store::flush(core.controller.model.remembered) || !volume_store::flush_pending() {
         r.last_error.store(ERRNO_EIO, Ordering::Release);
     }
     let mut changed = false;
@@ -446,6 +455,8 @@ pub fn handle_ui_event(page_index: usize, generation: u32, key: u32, event_id: u
                 | (key::DETAIL, ui::EVENT_CONNECTED_DETAIL)
                 | (key::DIAGNOSTICS, ui::EVENT_DIAGNOSTICS)
                 | (key::PAGE, ui::EVENT_BACK)
+                | (key::RECONNECT, ui::EVENT_RECONNECT)
+                | (key::PAIR_AGAIN, ui::EVENT_PAIR_AGAIN)
         ) {
             return true;
         }
@@ -506,6 +517,17 @@ fn handle_action(page_index: usize, event_id: u32) {
         return;
     }
     if event_id == ui::EVENT_REFRESH {
+        rebuild(page_index);
+        return;
+    }
+    if matches!(event_id, ui::EVENT_RECONNECT | ui::EVENT_PAIR_AGAIN) {
+        with_core(|core| {
+            if event_id == ui::EVENT_RECONNECT {
+                let _ = core.controller.reconnect();
+            } else {
+                let _ = core.controller.pair_again();
+            }
+        });
         rebuild(page_index);
         return;
     }

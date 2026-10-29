@@ -1001,6 +1001,7 @@ fn l2cap_callback_impl(event: u32, argument: *mut core::ffi::c_void, blocking: b
                     .store(TRANSPORT_CONNECTED, Ordering::Release);
                 if let Some(address) = target_load() {
                     core.controller.connected(Address(address));
+                    super::peer_store::schedule_flush();
                 }
                 let avrcp_result = avrcp_submit_connect();
                 if avrcp_result != 0 {

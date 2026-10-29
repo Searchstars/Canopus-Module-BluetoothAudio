@@ -65,6 +65,7 @@ pub extern "C" fn canopus_mod_activate(_ctx: *const ContextV1) -> i32 {
     // irreversible until reboot.
     #[cfg(feature = "device")]
     let rc = {
+        crate::target::peer_store::bind_context(_ctx);
         if !crate::target::runtime::initialized() {
             let mut generation = LOAD_GENERATION
                 .fetch_add(1, Ordering::AcqRel)

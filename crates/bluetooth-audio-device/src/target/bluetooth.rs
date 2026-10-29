@@ -5,7 +5,9 @@ use core::sync::atomic::Ordering;
 
 use canopus_target_private::*;
 
-use canopus_bluetooth_audio_core::{Address, DeviceName, DiscoveredDevice, Platform};
+use canopus_bluetooth_audio_core::{
+    Address, BondPreparation, DeviceName, DiscoveredDevice, Platform,
+};
 
 use super::runtime::*;
 use super::transport;
@@ -112,7 +114,7 @@ impl Platform for DevicePlatform {
         }
     }
 
-    fn prepare_bond(&mut self, address: Address) -> Result<bool, i32> {
+    fn prepare_bond(&mut self, address: Address, force_pair: bool) -> Result<BondPreparation, i32> {
         compatibility::install()?;
         let volume = volume_store::select(
             address.0,
@@ -121,7 +123,7 @@ impl Platform for DevicePlatform {
         runtime()
             .avrcp_volume
             .store(volume as u32, Ordering::Release);
-        prepare_fresh_bond(address)
+        prepare_target_bond(address, force_pair)
     }
 
     fn create_bond(&mut self, address: Address) -> Result<(), i32> {
@@ -276,11 +278,9 @@ extern "C" fn bond_timer_callback(
     0
 }
 
-/// Exact-target fresh-pair preflight. Removal is always attempted and pairing
-/// waits for the authoritative NONE callback when firmware accepts it; a
-/// rejected removal means there was no Classic bond to clear and pairing moves
-/// directly to stock bond submission.
-fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
+/// Reuses the firmware's exact Classic bond. An explicit retry of pairing keeps
+/// the fresh-pair removal transaction and its authoritative NONE callback.
+fn prepare_target_bond(address: Address, force_pair: bool) -> Result<BondPreparation, i32> {
     let r = runtime();
     // A failed or stranded attempt parks the transport with no other recovery
     // path. Reclaim it when no live channel remains; live channels first need
@@ -321,14 +321,15 @@ fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
             | FLAG_REMOVE_PENDING
             | FLAG_REMOVE_CONFIRMED,
     );
-    // Both bond views are published for the UI, but neither decides anything
-    // here. Firmware owns that judgement: native remove accepts a Classic
-    // record only in exact state 2 and otherwise returns nonzero having
-    // touched no state, so calling it unconditionally is safe and is the
-    // authoritative answer to "was there a bond to clear". Deciding from the
-    // recovered pairing-state accessor instead would put this path back at the
-    // mercy of that one recovered address being right.
-    query_bond(address);
+    // The aggregate presence bit can outlive a removed Classic bond. Only the
+    // exact transport state (2 = BONDED) permits a retained-key connection.
+    let (_, device) = query_bond(address);
+    if !force_pair && device == BOND_STATE_BONDED {
+        r.bond_state
+            .store(BOND_STATE_BONDED as i32, Ordering::Release);
+        flag_set(FLAG_BONDED, 0);
+        return Ok(BondPreparation::Bonded);
+    }
 
     flag_set(FLAG_REMOVE_PENDING, FLAG_REMOVE_CONFIRMED);
     if let Err(error) = arm_bond_timer(BOND_TIMER_REMOVE, REMOVE_TIMEOUT_MS) {
@@ -337,7 +338,7 @@ fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
     }
     if unsafe { bt_remove_bond(address.0.as_ptr(), CLASSIC_TRANSPORT) } == 0 {
         // Accepted: the authoritative NONE callback completes the transition.
-        return Ok(true);
+        return Ok(BondPreparation::Removing);
     }
 
     // Rejected: there is no removable Classic bond, and no bond-state callback
@@ -346,7 +347,7 @@ fn prepare_fresh_bond(address: Address) -> Result<bool, i32> {
     // will not bond over is reported by create_bond itself.
     cancel_bond_timer();
     flag_set(0, FLAG_REMOVE_PENDING);
-    Ok(false)
+    Ok(BondPreparation::Pair)
 }
 
 pub fn adapter_is_on() -> bool {
@@ -709,6 +710,9 @@ fn apply_core_event(core: &mut Core, kind: u8, address: [u8; 6]) {
     if result.is_err() {
         core.controller.model.connection = canopus_bluetooth_audio_core::ConnectionState::Failed;
         core.controller.model.touch();
+    }
+    if kind == CORE_EVENT_BOND_OK {
+        super::peer_store::schedule_flush();
     }
 }
 

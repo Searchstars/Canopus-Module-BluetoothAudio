@@ -169,6 +169,58 @@ fn packet_clock_writes_off_a_stall_the_sink_cannot_have_survived() {
 }
 
 #[test]
+fn packet_clock_builds_and_replenishes_a_bounded_music_runway() {
+    let mut clock = PacketClock::with_lead(80);
+    let mut sent = 0u32;
+    while clock.poll(0) == Pace::Send {
+        clock.sent(0, PACKET);
+        sent += 1;
+        assert!(sent <= 6);
+    }
+    assert_eq!(sent, 6); // 87 ms, not a whole track queued to the sink.
+    assert_eq!(clock.poll(0), Pace::Wait(8));
+    // The owner does not run for 60 ms: the already sent music still covers that time.
+    assert!(sent * PACKET * 1_000 / 44_100 > 60);
+    for now in (60..=6_000).step_by(60) {
+        while clock.poll(now) == Pace::Send {
+            clock.sent(now, PACKET);
+            sent += 1;
+        }
+        let audio_ms = u64::from(sent) * u64::from(PACKET) * 1_000 / 44_100;
+        assert!(audio_ms >= u64::from(now) + 80);
+        assert!(audio_ms <= u64::from(now) + 95);
+    }
+    assert_eq!(clock.take_worst_lag_ms(), 0);
+}
+
+#[test]
+fn packet_clock_rebuilds_runway_after_reset_and_a_long_stall() {
+    let mut clock = PacketClock::with_lead(80);
+    let start = u32::MAX - 20;
+    for reset in [false, true] {
+        if reset {
+            clock.reset();
+        }
+        let mut packets = 0;
+        while clock.poll(start) == Pace::Send {
+            clock.sent(start, PACKET);
+            packets += 1;
+            assert!(packets <= 6);
+        }
+        assert_eq!(packets, 6);
+        let late = start.wrapping_add(1_000);
+        let mut catchup = 0;
+        while clock.poll(late) == Pace::Send {
+            clock.sent(late, PACKET);
+            catchup += 1;
+            assert!(catchup <= 6);
+        }
+        assert_eq!(catchup, 6);
+        assert!(clock.take_worst_lag_ms() > PacketClock::CATCH_UP_LIMIT_MS);
+    }
+}
+
+#[test]
 fn packet_clock_survives_monotonic_wrap() {
     let mut clock = PacketClock::new();
     let start = u32::MAX - 5;
