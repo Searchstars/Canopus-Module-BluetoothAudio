@@ -59,6 +59,10 @@ scripts/build-device.sh
 
 注：该模块与Canopus框架属于并行开发关系，我希望利用在开发该模块过程中所获得的经验来完善Canopus框架，因此对Canopus框架的引用属于本地引用。在构建时，请确保Canopus框架项目文件夹与该项目文件夹同级。依赖路径使用相对路径，不绑定某台开发机的绝对目录；`CANOPUS_ROOT` 可覆盖构建脚本使用的 CLI、SDK 头文件和 target-pack checkout。
 
+应用登记需要 Canopus `2503271` 或更新版本的 SDK 和 Supervisor（统一的 `launcher::register_app` 接口）。模块在第一阶段提交三个原生页面及图标，Supervisor 按模块身份分配并持久化应用 ID，完成固件登记与桌面图标发布后，第二阶段确认登记完成。登记不会自动打开应用；用户点击桌面图标进入首页，页面间跳转沿用返回的 ID。模块不再占用固定的 `0xCB` 或直接调用固件应用登记函数。更新常驻 Supervisor 后需重启，再安装或启动新版模块。
+
+`canopus_mod_query` 的目标状态保留 20 个 `u32`：第 17 项现在是分配到的应用 ID（未登记为 0），第 18 项是同步登记错误，末两项保留为 0；异步登记失败由 Supervisor 报告。
+
 ### Target 选择
 
 Rust 私有 ABI 由 `canopus-target-private` facade 的互斥 `target-*` feature 选择。模块构建脚本读取 `targets/<target-id>.env`，由该文件映射 Cargo feature、Rust target triple、CPU 与 loader 大小限制。当前默认值为：

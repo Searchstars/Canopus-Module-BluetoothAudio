@@ -4,6 +4,9 @@
 
 mod module;
 
+#[cfg(any(feature = "device", test))]
+mod app_registration;
+
 #[cfg(feature = "device")]
 pub mod target;
 
