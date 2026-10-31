@@ -3,7 +3,7 @@ schema = 1
 [module]
 id = "bluetooth_audio"
 version = "0.1.1"
-version_code = 2
+version_code = 65537
 kind = "target"
 language = "rust"
 lifecycle = "resident-after-activation"
@@ -21,4 +21,3 @@ include = [
   "xiaomi-band-11-4.100.155",
   "xiaomi-band-11-4.100.179",
 ]
-
